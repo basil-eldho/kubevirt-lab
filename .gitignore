@@ -1,0 +1,51 @@
+# ── Large binary assets (never commit) ────────────────────────────────────────
+# Windows installation media is ~5.8 GB per file and is not redistributable.
+# Obtain it from Microsoft directly; see README.md § Golden images.
+disk/
+*.iso
+*.qcow2
+*.img
+*.vhd
+*.vhdx
+
+# ── Local fork of hashicorp/packer-plugin-kubevirt ────────────────────────────
+# Tracked as its own repository (github.com/basil-eldho/packer-plugin-kubevirt),
+# not vendored here. See README.md § Packer plugin fork for clone instructions.
+packer-plugin-kubevirt/
+
+# ── Build output ──────────────────────────────────────────────────────────────
+bin/
+dist/
+packer_cache/
+crash.log
+crash.*.log
+*.exe
+*.test
+*.out
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+vendor/
+go.work
+go.work.sum
+
+# ── Packer ────────────────────────────────────────────────────────────────────
+*.pkrvars.hcl
+!*.example.pkrvars.hcl
+.packer.d/
+
+# ── Local secrets / environment ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig
+.kube/
+
+# ── Editors / OS ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
