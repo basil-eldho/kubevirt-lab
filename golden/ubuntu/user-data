@@ -1,0 +1,34 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  identity:
+    hostname: golden-build
+    username: student
+    # Generate with: openssl passwd -6 ubuntu
+    password: "$6$rounds=4096$saltsaltsaltsalt$49e.E.2B7uCtPOdQ9yBxtrnpOO4boZYvtYVU2W6lK.m0P4EzSnwXraByt35qKSJ8LvKNpG82tgRq7VHV2CtNq0"
+
+  # Power off after installation so KubeVirt (RunStrategyAlways) restarts the
+  # VM from the installed disk. The plugin polls for VMI Stopped to detect this.
+  shutdown: poweroff
+
+  ssh:
+    install-server: yes
+    allow-pw: yes
+
+  storage:
+    layout:
+      name: direct
+
+  packages:
+    - openssh-server
+    - qemu-guest-agent
+
+  late-commands:
+    - curtin in-target -- systemctl enable ssh
+    - curtin in-target -- systemctl enable qemu-guest-agent
+    - "echo 'student ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/student"
+    - "chmod 440 /target/etc/sudoers.d/student"

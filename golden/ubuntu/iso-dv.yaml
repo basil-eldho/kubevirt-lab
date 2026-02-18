@@ -1,0 +1,18 @@
+# Import the Ubuntu 24.04 Server ISO into a DataVolume so Packer can boot from it.
+# CDI fetches it from the official mirror — only needs to run once.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ubuntu-2404-iso
+  annotations:
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+spec:
+  storage:
+    accessModes: [ReadWriteOnce]
+    resources:
+      requests:
+        storage: 3Gi
+    storageClassName: standard
+  source:
+    http:
+      url: "https://releases.ubuntu.com/24.04.3/ubuntu-24.04.3-live-server-amd64.iso"
