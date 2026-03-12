@@ -51,3 +51,29 @@ preflight: ## Check that required tools are installed
 
 cluster: preflight ## Create the kind cluster with KubeVirt + CDI
 	./scripts/setup-cluster.sh
+
+##@ Golden images (Packer, one-time)
+
+# Order-only prerequisite: cloned when absent, otherwise left untouched, so
+# building from a dirty local checkout keeps working.
+$(PLUGIN_DIR):
+	$(SAY) "Cloning the Packer plugin fork — $(PLUGIN_REF)"
+	git clone --branch $(PLUGIN_REF) --single-branch $(PLUGIN_REPO) $(PLUGIN_DIR)
+
+packer-init-local: | $(PLUGIN_DIR) ## Build and install the Packer plugin fork
+	$(MAKE) -C $(PLUGIN_DIR) build
+	packer plugins install --path $(PLUGIN_DIR)/packer-plugin-kubevirt "$(PLUGIN_SOURCE)"
+
+golden-ubuntu: packer-init-local ## Build the Ubuntu golden image (~20 min)
+	kubectl apply -f golden/ubuntu/iso-dv.yaml
+	kubectl wait --for=condition=Ready dv/ubuntu-2404-iso --timeout=20m
+	$(SAY) "Packer build: installs OS, XFCE, x11vnc, then generalizes"
+	cd golden/ubuntu && KUBECONFIG=~/.kube/config packer build \
+		-var "namespace=$(NAMESPACE)" \
+		-var "name=$(GOLDEN_UBUNTU)" \
+		ubuntu.pkr.hcl
+	$(SAY) "Ubuntu golden image ready — DataSource $(GOLDEN_UBUNTU)"
+
+# Autounattend.xml goes in both places: sources/ for the windowsPE pass, root
+# for setup. One shell so the trap survives every step; a private mktemp -d
+# rather than /mnt, which would clobber whatever is already mounted there.
