@@ -1,0 +1,21 @@
+# CDI DataSource — the stable reference pool VMs clone from.
+# Packer creates this automatically after a successful build.
+# Apply manually only if you need to recreate it (e.g. after cluster reset).
+#
+# To upgrade the golden image later:
+#   1. Run: make golden-ubuntu  (Packer builds a new DataVolume)
+#   2. Patch this DataSource to point at the new PVC — pool VMs on next
+#      refill will use the updated image automatically.
+#
+# When Ceph is available, change spec.source from pvc → snapshot for instant
+# CoW clones (no other changes required in the pool controller).
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataSource
+metadata:
+  name: ubuntu-golden
+  namespace: default
+spec:
+  source:
+    pvc:
+      name: ubuntu-golden      # DataVolume PVC created by Packer
+      namespace: default
