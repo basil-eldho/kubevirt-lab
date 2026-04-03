@@ -1,0 +1,21 @@
+# Windows ISO DataVolume — uploaded from local disk via virtctl.
+# After applying, upload with:
+#   virtctl image-upload dv windows-iso \
+#     --size=8Gi \
+#     --image-path=/home/sandworm/kubevirt/windows-10/Win10_22H2_EnglishInternational_x64v1.iso \
+#     --insecure
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: windows-iso
+  annotations:
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+spec:
+  storage:
+    accessModes: [ReadWriteOnce]
+    resources:
+      requests:
+        storage: 8Gi
+    storageClassName: standard
+  source:
+    upload: {}
