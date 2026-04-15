@@ -77,3 +77,57 @@ golden-ubuntu: packer-init-local ## Build the Ubuntu golden image (~20 min)
 # Autounattend.xml goes in both places: sources/ for the windowsPE pass, root
 # for setup. One shell so the trap survives every step; a private mktemp -d
 # rather than /mnt, which would clobber whatever is already mounted there.
+prepare-windows-iso: ## Inject Autounattend.xml into the Windows ISO
+	@if [ ! -f "$(WIN_ISO_SRC)" ]; then \
+		printf '\033[1;33m! Windows ISO not found at %s\n' "$(WIN_ISO_SRC)"; \
+		printf '  Optional — Ubuntu-only needs nothing here. Drop a Windows 10 22H2\n'; \
+		printf '  x64 ISO in disk/, or pass WIN_ISO_SRC=/path/to.iso\033[0m\n'; \
+		exit 1; fi
+	@set -e; \
+	mnt=$$(mktemp -d); ext=$$(mktemp -d); \
+	trap 'sudo umount "$$mnt" 2>/dev/null || true; rmdir "$$mnt" 2>/dev/null || true; rm -rf "$$ext"' EXIT; \
+	printf '\033[0;32m▸ %s\033[0m\n' "Repacking Windows ISO with Autounattend.xml"; \
+	sudo mount -o loop,ro "$(WIN_ISO_SRC)" "$$mnt"; \
+	rsync -a "$$mnt"/ "$$ext"/; \
+	sudo umount "$$mnt"; \
+	chmod -R u+w "$$ext"; \
+	cp golden/windows/autounattend.xml "$$ext"/Autounattend.xml; \
+	cp golden/windows/autounattend.xml "$$ext"/sources/Autounattend.xml; \
+	xorriso -as mkisofs \
+		-iso-level 3 -full-iso9660-filenames \
+		-rock -joliet -joliet-long \
+		-disable-deep-relocation -untranslated-filenames \
+		-b boot/etfsboot.com -no-emul-boot -boot-load-size 8 -boot-info-table \
+		-eltorito-alt-boot -eltorito-platform efi \
+		-b efi/microsoft/boot/efisys.bin -no-emul-boot \
+		-V "CCCOMA_X64FRE_EN-GB_DV9" \
+		-o "$(WIN_ISO_OUT)" \
+		"$$ext"
+	$(SAY) "Unattended ISO ready: $(WIN_ISO_OUT)"
+
+golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golden image (~45 min)
+	kubectl delete dv windows-iso --ignore-not-found
+	kubectl patch pvc windows-iso -n $(NAMESPACE) -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+	kubectl delete pvc windows-iso --ignore-not-found
+	kubectl apply -f golden/windows/iso-dv.yaml
+	kubectl wait --for=jsonpath='{.status.phase}'=UploadReady dv/windows-iso --timeout=5m
+	$(SAY) "Uploading the Windows ISO — takes a few minutes"
+	# Kill the forward by its own PID and let a failed upload fail the target.
+	@set -e; \
+	kubectl port-forward -n cdi svc/cdi-uploadproxy 18443:443 & \
+	pf=$$!; \
+	trap 'kill $$pf 2>/dev/null || true' EXIT; \
+	sleep 3; \
+	virtctl image-upload dv windows-iso \
+		--size=8Gi \
+		--image-path="$(WIN_ISO_OUT)" \
+		--uploadproxy-url=https://localhost:18443 \
+		--force-bind --insecure
+	kubectl wait --for=condition=Ready dv/windows-iso --timeout=10m
+	$(SAY) "Packer build: autounattend install, then WinRM provisioners"
+	cd golden/windows && KUBECONFIG=~/.kube/config PACKER_LOG=1 packer build \
+		-var "namespace=$(NAMESPACE)" \
+		-var "name=$(GOLDEN_WINDOWS)" \
+		windows.pkr.hcl
+	$(SAY) "Windows golden image ready — DataSource $(GOLDEN_WINDOWS)"
+
