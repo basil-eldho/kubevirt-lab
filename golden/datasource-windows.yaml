@@ -1,0 +1,13 @@
+# CDI DataSource for Windows golden image.
+# Same pattern as datasource-ubuntu.yaml — upgrade by re-running Packer
+# and patching the PVC name below. Switch to snapshot: for Ceph CoW.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataSource
+metadata:
+  name: windows-golden
+  namespace: default
+spec:
+  source:
+    pvc:
+      name: windows-golden     # DataVolume PVC created by Packer
+      namespace: default
