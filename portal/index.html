@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lab Desktop</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0d0d1a;
+      color: #e2e2f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Login screen ─────────────────────────────────────── */
+    #login-screen {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #16162a;
+      border: 1px solid #2a2a4a;
+      border-radius: 16px;
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 440px;
+      text-align: center;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+    }
+
+    .icon { font-size: 52px; margin-bottom: 20px; line-height: 1; }
+    h1 { font-size: 26px; font-weight: 700; color: #fff; margin-bottom: 8px; }
+    .subtitle { font-size: 14px; color: #6b6b8a; margin-bottom: 36px; line-height: 1.5; }
+
+    label.field-label {
+      display: block;
+      text-align: left;
+      font-size: 12px;
+      font-weight: 600;
+      color: #8888aa;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 8px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 14px 16px;
+      background: #0d0d1a;
+      border: 1.5px solid #2a2a4a;
+      border-radius: 10px;
+      color: #e2e2f0;
+      font-size: 16px;
+      margin-bottom: 24px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    input[type="text"]:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
+    input[type="text"]::placeholder { color: #3a3a5a; }
+
+    /* OS selector */
+    .os-selector {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    .os-option {
+      position: relative;
+    }
+
+    .os-option input[type="radio"] {
+      position: absolute;
+      opacity: 0;
+      width: 0; height: 0;
+    }
+
+    .os-option label {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 14px 10px;
+      background: #0d0d1a;
+      border: 1.5px solid #2a2a4a;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 13px;
+      font-weight: 500;
+      color: #8888aa;
+    }
+
+    .os-option label .os-icon { font-size: 24px; }
+    .os-option label .os-name { color: #c0c0e0; font-weight: 600; }
+    .os-option label .os-hint { font-size: 11px; color: #5a5a7a; }
+
+    .os-option input:checked + label {
+      border-color: #6366f1;
+      background: rgba(99,102,241,0.08);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.12);
+    }
+    .os-option input:checked + label .os-name { color: #a5b4fc; }
+
+    .btn-primary {
+      width: 100%;
+      padding: 14px;
+      background: #6366f1;
+      border: none;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn-primary:hover:not(:disabled) { background: #4f52e0; }
+    .btn-primary:active:not(:disabled) { transform: scale(0.98); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .error-box {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 16px;
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.3);
+      border-radius: 8px;
+      color: #f87171;
+      font-size: 14px;
+      text-align: left;
+    }
+
+    /* ── Desktop screen ───────────────────────────────────── */
+    #desktop-screen {
+      display: none;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    .topbar {
+      background: #16162a;
+      border-bottom: 1px solid #2a2a4a;
+      padding: 0 20px;
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .topbar-left { display: flex; align-items: center; gap: 10px; }
+    .topbar-title { font-size: 14px; font-weight: 600; color: #fff; }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+
+    .badge {
+      background: rgba(99,102,241,0.15);
+      border: 1px solid rgba(99,102,241,0.3);
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-size: 12px;
+      color: #a5b4fc;
+      font-weight: 500;
+    }
+
+    .os-badge {
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .os-badge.ubuntu  { background: rgba(249,115,22,0.15); border: 1px solid rgba(249,115,22,0.3); color: #fb923c; }
+    .os-badge.windows { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); color: #60a5fa; }
+
+    .btn-end {
+      padding: 6px 14px;
+      background: rgba(239,68,68,0.15);
+      border: 1px solid rgba(239,68,68,0.3);
+      border-radius: 7px;
+      color: #f87171;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-end:hover { background: rgba(239,68,68,0.25); }
+
+    #desktop-frame { flex: 1; border: none; width: 100%; background: #000; }
+
+    /* ── Loading overlay ──────────────────────────────────── */
+    #loading-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(13,13,26,0.92);
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 20px;
+      z-index: 999;
+      backdrop-filter: blur(4px);
+    }
+    .spinner { width: 44px; height: 44px; border: 3px solid #2a2a4a; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.75s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-text { font-size: 15px; color: #a5b4fc; font-weight: 500; }
+  </style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen">
+  <div class="card">
+    <div class="icon">🖥️</div>
+    <h1>Lab Desktop</h1>
+    <p class="subtitle">Choose your OS, enter your student ID, and get an instant desktop.</p>
+
+    <label class="field-label">Operating System</label>
+    <div class="os-selector">
+      <div class="os-option">
+        <input type="radio" id="os-ubuntu" name="os_type" value="ubuntu" checked>
+        <label for="os-ubuntu">
+          <span class="os-icon">🐧</span>
+          <span class="os-name">Ubuntu</span>
+          <span class="os-hint">Browser VNC</span>
+        </label>
+      </div>
+      <div class="os-option">
+        <input type="radio" id="os-windows" name="os_type" value="windows">
+        <label for="os-windows">
+          <span class="os-icon">🪟</span>
+          <span class="os-name">Windows</span>
+          <span class="os-hint">Browser RDP</span>
+        </label>
+      </div>
+    </div>
+
+    <label class="field-label" for="student-id">Student ID</label>
+    <input type="text" id="student-id" placeholder="e.g. student42" autocomplete="off" autofocus>
+
+    <button class="btn-primary" id="launch-btn" onclick="launch()">Launch Desktop</button>
+    <div class="error-box" id="error-box"></div>
+  </div>
+</div>
+
+<!-- Desktop -->
+<div id="desktop-screen">
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="dot"></div>
+      <span class="topbar-title">Lab Desktop</span>
+      <span class="badge" id="student-badge"></span>
+      <span class="os-badge" id="os-badge"></span>
+    </div>
+    <button class="btn-end" onclick="endSession()">End Session</button>
+  </div>
+  <iframe id="desktop-frame" src="" allowfullscreen></iframe>
+</div>
+
+<!-- Loading -->
+<div id="loading-overlay">
+  <div class="spinner"></div>
+  <div class="loading-text" id="loading-text">Launching your desktop…</div>
+</div>
+
+<script>
+  // API is on port 30001 (provisioning-api NodePort)
+  const API = `http://${location.hostname}:30001`;
+
+  let sessionId = null;
+
+  document.getElementById('student-id').addEventListener('keydown', e => {
+    if (e.key === 'Enter') launch();
+  });
+
+  function selectedOS() {
+    return document.querySelector('input[name="os_type"]:checked').value;
+  }
+
+  async function launch() {
+    const name   = document.getElementById('student-id').value.trim();
+    const osType = selectedOS();
+
+    if (!name) { showError('Please enter your student ID.'); return; }
+
+    const loadingMsg = osType === 'windows'
+      ? 'Connecting to your Windows desktop…'
+      : 'Launching your Ubuntu desktop…';
+
+    setLoading(true, loadingMsg);
+    clearError();
+
+    try {
+      const res = await fetch(
+        `${API}/provision?student_name=${encodeURIComponent(name)}&os_type=${osType}`,
+        { method: 'POST' }
+      );
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.detail || `Server error (${res.status})`);
+
+      sessionId = data.session_id;
+
+      document.getElementById('student-badge').textContent = `👤 ${name}`;
+      const osBadge = document.getElementById('os-badge');
+      osBadge.textContent = osType === 'windows' ? '🪟 Windows' : '🐧 Ubuntu';
+      osBadge.className   = `os-badge ${osType}`;
+
+      document.getElementById('desktop-frame').src = data.access_url;
+
+      document.getElementById('login-screen').style.display  = 'none';
+      document.getElementById('desktop-screen').style.display = 'flex';
+      setLoading(false);
+    } catch (err) {
+      setLoading(false);
+      showError(err.message);
+    }
+  }
+
+  async function endSession() {
+    if (!confirm('End your session?\n\nYour desktop and all unsaved work will be lost.')) return;
+
+    if (sessionId) {
+      try { await fetch(`${API}/session/${sessionId}`, { method: 'DELETE' }); } catch {}
+      sessionId = null;
+    }
+
+    document.getElementById('desktop-frame').src = '';
+    document.getElementById('desktop-screen').style.display = 'none';
+    document.getElementById('login-screen').style.display   = 'flex';
+    document.getElementById('student-id').value = '';
+    document.getElementById('student-id').focus();
+  }
+
+  function setLoading(show, text = '') {
+    document.getElementById('loading-overlay').style.display = show ? 'flex' : 'none';
+    if (text) document.getElementById('loading-text').textContent = text;
+    document.getElementById('launch-btn').disabled = show;
+  }
+
+  function showError(msg) {
+    const el = document.getElementById('error-box');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function clearError() {
+    document.getElementById('error-box').style.display = 'none';
+  }
+</script>
+</body>
+</html>
