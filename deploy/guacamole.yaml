@@ -1,0 +1,183 @@
+# Guacamole stack (MySQL + guacd + guacamole) for Windows RDP.
+#
+# The passwords in this file are throwaway lab values kept inline so the lab
+# reproduces from a fresh clone. They are not secrets and are not used anywhere
+# real. Replace them with Kubernetes Secrets before any deployment that is not
+# an isolated lab network.
+
+# ── MySQL ─────────────────────────────────────────────────────────────────────
+# initContainer extracts the Guacamole schema SQL from the guacamole image and
+# drops it into MySQL's initdb.d so the schema is created on first start.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-data
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: standard
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      initContainers:
+      - name: extract-schema
+        image: guacamole/guacamole:1.5.4
+        command:
+          - /bin/sh
+          - -c
+          - |
+            cat /opt/guacamole/mysql/schema/001-create-schema.sql \
+                /opt/guacamole/mysql/schema/002-create-admin-user.sql \
+                > /initdb/schema.sql
+        volumeMounts:
+        - name: initdb
+          mountPath: /initdb
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: rootpass
+        - name: MYSQL_DATABASE
+          value: guacamole_db
+        - name: MYSQL_USER
+          value: guacamole_user
+        - name: MYSQL_PASSWORD
+          value: guacamole_pass
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+        - name: initdb
+          mountPath: /docker-entrypoint-initdb.d
+        readinessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: mysql-data
+      - name: initdb
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: default
+spec:
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
+# ── guacd (protocol daemon) ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guacd
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guacd
+  template:
+    metadata:
+      labels:
+        app: guacd
+    spec:
+      containers:
+      - name: guacd
+        image: guacamole/guacd:1.5.4
+        ports:
+        - containerPort: 4822
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guacd
+  namespace: default
+spec:
+  selector:
+    app: guacd
+  ports:
+  - port: 4822
+    targetPort: 4822
+---
+# ── Guacamole web app ─────────────────────────────────────────────────────────
+# No NodePort — students reach it via the portal's NGINX proxy at /guacamole/
+# (same origin, which is required for the ?token= auto-login URL to work)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guacamole
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guacamole
+  template:
+    metadata:
+      labels:
+        app: guacamole
+    spec:
+      containers:
+      - name: guacamole
+        image: guacamole/guacamole:1.5.4
+        env:
+        - name: GUACD_HOSTNAME
+          value: guacd
+        - name: GUACD_PORT
+          value: "4822"
+        - name: MYSQL_HOSTNAME
+          value: mysql
+        - name: MYSQL_PORT
+          value: "3306"
+        - name: MYSQL_DATABASE
+          value: guacamole_db
+        - name: MYSQL_USER
+          value: guacamole_user
+        - name: MYSQL_PASSWORD
+          value: guacamole_pass
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /guacamole/
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guacamole
+  namespace: default
+spec:
+  selector:
+    app: guacamole
+  ports:
+  - port: 8080
+    targetPort: 8080
