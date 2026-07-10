@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provisioning-api
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: provisioning-api
+  template:
+    metadata:
+      labels:
+        app: provisioning-api
+    spec:
+      serviceAccountName: pool-controller
+      containers:
+      - name: api
+        image: pool-api:v1
+        imagePullPolicy: Never
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: REDIS_ADDR
+          value: "redis:6379"
+        - name: SESSION_TIMEOUT
+          value: "3600"
+        - name: GUACAMOLE_URL
+          value: "http://guacamole:8080/guacamole"
+        - name: GUACAMOLE_USER
+          value: "guacadmin"
+        - name: GUACAMOLE_PASS
+          value: "guacadmin"
+        - name: GUACAMOLE_DATA_SOURCE
+          value: "mysql"
+        - name: PORTAL_NODEPORT
+          value: "30000"
+        - name: WINDOWS_USER
+          value: "student"
+        - name: WINDOWS_PASS
+          value: "Lab@2024!"
+        - name: UBUNTU_USER
+          value: "student"
+        # Must match the x11vnc password baked into the Ubuntu golden image by
+        # golden/ubuntu/scripts/setup-desktop.sh. VNC auth uses only the first
+        # 8 characters, so this is exactly 8 — do not lengthen it.
+        - name: UBUNTU_VNC_PASS
+          value: "Lab@2024"
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: provisioning-api
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: provisioning-api
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30001

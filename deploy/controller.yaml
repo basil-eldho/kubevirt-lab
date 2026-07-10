@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pool-controller
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pool-controller
+  template:
+    metadata:
+      labels:
+        app: pool-controller
+    spec:
+      serviceAccountName: pool-controller
+      containers:
+      - name: controller
+        image: pool-controller:v1
+        imagePullPolicy: Never
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: MIN_POOL_UBUNTU
+          value: "1"
+        # Windows is opt-in — it needs the golden image built first.
+        # The Makefile overrides both values at apply time.
+        - name: MIN_POOL_WINDOWS
+          value: "1"
+        - name: DATASOURCE_UBUNTU
+          value: "ubuntu-golden"
+        - name: DATASOURCE_WINDOWS
+          value: "windows-golden"
+        - name: DISK_SIZE_UBUNTU
+          value: "20Gi"
+        - name: DISK_SIZE_WINDOWS
+          value: "64Gi"
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
