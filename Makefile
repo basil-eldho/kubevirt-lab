@@ -40,6 +40,11 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} \
 		/^##@/ { printf "\n  \033[1m%s\033[0m\n", substr($$0, 5) } \
 		/^[a-zA-Z0-9_-]+:.*##/ { printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@printf '\n  \033[1mFirst run, in order:\033[0m\n'
+	@printf '    make cluster          # kind + KubeVirt + CDI\n'
+	@printf '    make golden-ubuntu    # one-time, ~20 min\n'
+	@printf '    make deploy && make urls\n'
+	@printf '\n  \033[1mAdd Windows later:\033[0m  make golden-windows && make deploy MIN_POOL_WINDOWS=1\n\n'
 
 ##@ Setup
 
@@ -130,4 +135,69 @@ golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golde
 		-var "name=$(GOLDEN_WINDOWS)" \
 		windows.pkr.hcl
 	$(SAY) "Windows golden image ready — DataSource $(GOLDEN_WINDOWS)"
+
+##@ Deploy
+
+# Listed in the order `deploy` runs them: guards first (they fail in seconds),
+# then the image build, then the cluster objects.
+check-namespace: ## Refuse a NAMESPACE the deploy manifests cannot honour
+	@if [ "$(NAMESPACE)" != "default" ]; then \
+		printf '\033[1;33m! NAMESPACE=%s unsupported: deploy/ hardcodes `namespace: default`,\n' '$(NAMESPACE)'; \
+		printf '  so the platform and the golden images would land in different places.\033[0m\n'; \
+		exit 1; fi
+
+# Without the DataSource the controller still creates VMs; their clone just
+# never resolves and the pool sits at zero with nothing obvious in the logs.
+# Only enabled pools are checked, so Ubuntu-only needs no Windows image.
+check-golden: ## Verify the golden DataSources the enabled pools need
+	@rc=0; \
+	ready() { kubectl get datasource "$$1" -n $(NAMESPACE) \
+		-o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -qx True; }; \
+	if [ "$(MIN_POOL_UBUNTU)" -gt 0 ] 2>/dev/null && ! ready $(GOLDEN_UBUNTU); then \
+		printf '\033[1;33m! Ubuntu pool is %s but DataSource "%s" is missing or not ready\n  Run: make golden-ubuntu\033[0m\n' \
+			'$(MIN_POOL_UBUNTU)' '$(GOLDEN_UBUNTU)'; rc=1; \
+	fi; \
+	if [ "$(MIN_POOL_WINDOWS)" -gt 0 ] 2>/dev/null && ! ready $(GOLDEN_WINDOWS); then \
+		printf '\033[1;33m! Windows pool is %s but DataSource "%s" is missing or not ready\n  Run: make golden-windows\033[0m\n' \
+			'$(MIN_POOL_WINDOWS)' '$(GOLDEN_WINDOWS)'; rc=1; \
+	fi; \
+	exit $$rc
+
+build: ## Build the controller and API images
+	docker build --target controller -t pool-controller:v1 pool-go/
+	docker build --target api -t pool-api:v1 pool-go/
+
+load-kind: build ## Build, then load images into the kind node
+	kind load docker-image pool-controller:v1
+	kind load docker-image pool-api:v1
+	$(SAY) "Images loaded into kind"
+
+setup-rbac: ## Apply the controller ServiceAccount and RBAC
+	kubectl apply -f deploy/rbac.yaml
+
+deploy-guacamole: ## Deploy the Guacamole stack (MySQL, guacd, Guacamole)
+	kubectl apply -f deploy/guacamole.yaml
+	$(WARN) "Waiting for MySQL — the first start runs schema init"
+	kubectl wait --for=condition=Ready pod -l app=mysql --timeout=3m
+	kubectl wait --for=condition=Ready pod -l app=guacamole --timeout=2m
+
+# load-kind is a prerequisite because the manifests use imagePullPolicy: Never —
+# the images must be on the node already or the pods hit ErrImageNeverPull.
+deploy: check-namespace check-golden load-kind setup-rbac deploy-guacamole ## Deploy the controller, API, and portal
+	kubectl apply -f deploy/redis.yaml
+	kubectl wait --for=condition=Ready pod -l app=redis --timeout=60s
+	kubectl apply -f deploy/windows-pool-unattend.yaml
+	kubectl apply -f deploy/controller.yaml
+	# Set unconditionally: comparing against controller.yaml's defaults first
+	# would rot silently the moment either default is edited.
+	kubectl set env deployment/pool-controller \
+		MIN_POOL_UBUNTU=$(MIN_POOL_UBUNTU) MIN_POOL_WINDOWS=$(MIN_POOL_WINDOWS) \
+		DATASOURCE_UBUNTU=$(GOLDEN_UBUNTU) DATASOURCE_WINDOWS=$(GOLDEN_WINDOWS)
+	kubectl apply -f deploy/api.yaml
+	kubectl create configmap portal-html --from-file=index.html=portal/index.html \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl create configmap portal-nginx-conf --from-file=nginx.conf=portal/nginx.conf \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl apply -f deploy/portal.yaml
+	$(SAY) "Deployed (ubuntu=$(MIN_POOL_UBUNTU), windows=$(MIN_POOL_WINDOWS)). Warm in 3-8 min: make status"
 
