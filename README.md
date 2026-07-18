@@ -68,3 +68,55 @@ the guest deleted all four, and closed the unauthenticated-NodePort exposure alo
 
 ---
 
+## Prerequisites
+
+- `docker`, `kind`, `kubectl`, `packer`, `virtctl`
+- A machine with enough headroom for the pools: roughly **16 GB RAM** for the default 2 Ubuntu
+  (2 GB each) + 1 Windows (4 GB) pool plus the platform components, and **~200 GB disk** for golden
+  images and per-VM clones.
+- A Windows 10 ISO, if you want the Windows pool. It is **not** included in this repository and is
+  not redistributable — download it from Microsoft and drop it in `disk/` (see
+  [Golden images](#golden-images)).
+
+## Quickstart
+
+Ubuntu only — three commands, and the middle one is the slow part:
+
+```bash
+make cluster          # kind + KubeVirt v1.8.2 + CDI v1.65.0 (idempotent)
+make golden-ubuntu    # one-time Packer build, ~20 min
+make deploy           # builds and loads images, then deploys everything
+
+make urls             # portal URL
+make status           # pool depth and active sessions
+```
+
+`make deploy` pulls in image build/load and the Guacamole stack as prerequisites, so there is no
+separate step to forget. The manifests use `imagePullPolicy: Never`, which is why the images have to
+reach the kind node before the pods start.
+
+**Adding Windows** is opt-in, because it needs its own ~45 minute golden build and a Windows ISO you
+supply. `MIN_POOL_WINDOWS` defaults to `0` so that a fresh Ubuntu-only install does not sit trying to
+clone a `windows-golden` DataSource that was never built:
+
+```bash
+make golden-windows                    # includes prepare-windows-iso
+make deploy MIN_POOL_WINDOWS=1
+```
+
+`make help` lists every target. Pool depth is tunable at deploy time:
+
+```bash
+make deploy MIN_POOL_UBUNTU=4 MIN_POOL_WINDOWS=2
+```
+
+### Cleanup
+
+```bash
+make clean                   # remove pool VMs, controllers, and Guacamole; keep golden images
+make clean-all               # the above, plus the golden images and their DataSources
+make clean-golden-windows    # force-clean a stuck Packer build (run after Ctrl+C)
+```
+
+---
+
