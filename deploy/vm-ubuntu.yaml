@@ -1,0 +1,72 @@
+# Standalone Ubuntu VM cloned from the golden image — no pool controller, no API,
+# no Guacamole. `make vm OS=ubuntu` substitutes __NAME__ and __DATASOURCE__.
+#
+# Deliberately NOT labelled managed-by=pool-controller: that label would make the
+# pool controller count this VM toward MinSize and make `make clean` delete it.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: __NAME__
+  namespace: default
+  labels:
+    app: lab-vm
+    lab-vm-os: ubuntu
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+  - metadata:
+      name: __NAME__-disk
+    spec:
+      sourceRef:
+        kind: DataSource
+        name: __DATASOURCE__
+        namespace: default
+      storage:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi
+        storageClassName: standard
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: __NAME__
+        app: lab-vm
+    spec:
+      domain:
+        cpu:
+          cores: 2
+          model: host-passthrough
+        resources:
+          requests:
+            memory: 2Gi
+        features:
+          smm:
+            enabled: true
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: false
+        devices:
+          disks:
+          - name: rootdisk
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: default
+            masquerade: {}
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: rootdisk
+        dataVolume:
+          name: __NAME__-disk
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            hostname: __NAME__

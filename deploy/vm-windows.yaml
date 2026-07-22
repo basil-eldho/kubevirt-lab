@@ -1,0 +1,84 @@
+# Standalone Windows VM cloned from the golden image — no pool controller, no
+# API, no Guacamole. `make vm OS=windows` substitutes __NAME__ and __DATASOURCE__.
+#
+# Deliberately NOT labelled managed-by=pool-controller: that label would make the
+# pool controller count this VM toward MinSize and make `make clean` delete it.
+#
+# The sysprep volume is required. The golden image was sysprepped with /oobe, so
+# without an answer file the clone boots into the OOBE wizard instead of the
+# desktop. It reads the same ConfigMap the pool VMs use, applied by `make deploy`
+# — see the note in the vm target if you are running without the platform.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: __NAME__
+  namespace: default
+  labels:
+    app: lab-vm
+    lab-vm-os: windows
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+  - metadata:
+      name: __NAME__-disk
+    spec:
+      sourceRef:
+        kind: DataSource
+        name: __DATASOURCE__
+        namespace: default
+      storage:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 64Gi
+        storageClassName: standard
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: __NAME__
+        app: lab-vm
+    spec:
+      domain:
+        cpu:
+          cores: 2
+          model: host-passthrough
+        resources:
+          requests:
+            memory: 4Gi
+        features:
+          smm:
+            enabled: true
+          hyperv:
+            relaxed:
+              enabled: true
+            vapic:
+              enabled: true
+            spinlocks:
+              enabled: true
+              spinlocks: 8191
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: false
+        devices:
+          disks:
+          - name: rootdisk
+            disk:
+              bus: virtio
+          - name: sysprep
+            cdrom:
+              bus: sata
+          interfaces:
+          - name: default
+            masquerade: {}
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: rootdisk
+        dataVolume:
+          name: __NAME__-disk
+      - name: sysprep
+        sysprep:
+          configMap:
+            name: windows-pool-unattend
