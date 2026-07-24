@@ -201,3 +201,61 @@ deploy: check-namespace check-golden load-kind setup-rbac deploy-guacamole ## De
 	kubectl apply -f deploy/portal.yaml
 	$(SAY) "Deployed (ubuntu=$(MIN_POOL_UBUNTU), windows=$(MIN_POOL_WINDOWS)). Warm in 3-8 min: make status"
 
+##@ Operate
+
+status: ## Show pool depth and active sessions
+	@printf '\n\033[1mPool VMs\033[0m\n'
+	@kubectl get vm -l managed-by=pool-controller \
+		-o custom-columns='NAME:.metadata.name,TYPE:.metadata.labels.pool-type,STATE:.metadata.labels.pool,VMI:.status.printableStatus' \
+		2>/dev/null || echo "  none"
+	@printf '\n\033[1mAPI\033[0m\n'
+	@curl -s "http://$(NODE_IP):30001/status" 2>/dev/null | python3 -m json.tool 2>/dev/null \
+		|| echo "  not reachable yet"
+
+urls: ## Print the portal and API URLs
+	@ip=$(NODE_IP); \
+	printf '\n  Student portal  http://%s:30000\n'   "$$ip"; \
+	printf '  API status      http://%s:30001/status\n' "$$ip"; \
+	printf '  Guacamole admin http://%s:30000/guacamole/\n\n' "$$ip"
+
+logs: ## Tail the pool controller logs
+	kubectl logs -f deployment/pool-controller
+
+##@ Standalone VMs (no pool controller or API)
+
+# Guacamole plus the portal's nginx — that proxy carries the WebSocket upgrade
+# the token URL depends on. The controller, provisioning API and Redis are not
+# involved. Safe to run alongside the full platform: these VMs are labelled
+# app=lab-vm, so the pool controller ignores them and `make clean` spares them.
+vm-serve: deploy-guacamole ## Deploy only what browser access needs (Guacamole + portal)
+	kubectl create configmap portal-html --from-file=index.html=portal/index.html \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl create configmap portal-nginx-conf --from-file=nginx.conf=portal/nginx.conf \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl apply -f deploy/portal.yaml
+	kubectl wait --for=condition=Ready pod -l app=student-portal --timeout=2m
+
+vm: ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
+	@case "$(OS)" in ubuntu) ds=$(GOLDEN_UBUNTU);; windows) ds=$(GOLDEN_WINDOWS);; \
+		*) printf '\033[1;33m! OS must be ubuntu or windows\033[0m\n'; exit 1;; esac; \
+	kubectl get datasource $$ds -n $(NAMESPACE) >/dev/null 2>&1 || { \
+		printf '\033[1;33m! DataSource "%s" missing — run: make golden-$(OS)\033[0m\n' "$$ds"; exit 1; }; \
+	if [ "$(OS)" = windows ]; then kubectl apply -f deploy/windows-pool-unattend.yaml; fi; \
+	sed -e 's/__NAME__/$(NAME)/g' -e "s/__DATASOURCE__/$$ds/g" deploy/vm-$(OS).yaml | kubectl apply -f -
+	$(SAY) "Cloning the golden disk — a few minutes"
+	# Wait on the VM, not the VMI: the VMI does not exist until the clone
+	# finishes, and kubectl wait errors on a missing object. vm-connect.sh then
+	# waits for the desktop itself to answer.
+	kubectl wait --for=condition=Ready vm/$(NAME) -n $(NAMESPACE) --timeout=15m
+	$(SAY) "Waiting for the desktop to come up"
+	@./scripts/vm-connect.sh $(NAME) $(OS)
+
+vm-url: ## Reprint a VM's browser link with a fresh token (NAME=lab1 OS=ubuntu)
+	@./scripts/vm-connect.sh $(NAME) $(OS)
+
+vm-delete: ## Delete a standalone VM, its disk and its Service (NAME=lab1)
+	kubectl delete vm $(NAME) -n $(NAMESPACE) --ignore-not-found
+	kubectl delete dv $(NAME)-disk -n $(NAMESPACE) --ignore-not-found
+	kubectl delete svc desktop-$(NAME) -n $(NAMESPACE) --ignore-not-found
+	$(WARN) "Guacamole connection '$(NAME)' and user 'lab-vm-$(NAME)' left in place — remove them in the admin UI"
+	
