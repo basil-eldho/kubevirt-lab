@@ -259,3 +259,46 @@ vm-delete: ## Delete a standalone VM, its disk and its Service (NAME=lab1)
 	kubectl delete svc desktop-$(NAME) -n $(NAMESPACE) --ignore-not-found
 	$(WARN) "Guacamole connection '$(NAME)' and user 'lab-vm-$(NAME)' left in place — remove them in the admin UI"
 	
+##@ Cleanup
+
+clean: ## Remove the platform and pool VMs, keeping golden images
+	kubectl delete deployment pool-controller provisioning-api student-portal redis --ignore-not-found
+	kubectl delete svc provisioning-api student-portal redis --ignore-not-found
+	kubectl delete configmap portal-html portal-nginx-conf --ignore-not-found
+	@kubectl get vm -l managed-by=pool-controller -o name 2>/dev/null | xargs -r kubectl delete
+	@kubectl get svc -l managed-by=pool-controller -o name 2>/dev/null | xargs -r kubectl delete
+	kubectl delete -f deploy/guacamole.yaml --ignore-not-found
+	kubectl delete pvc mysql-data --ignore-not-found
+	kubectl delete clusterrolebinding pool-controller --ignore-not-found
+	kubectl delete clusterrole pool-controller --ignore-not-found
+	kubectl delete sa pool-controller --ignore-not-found
+	$(SAY) "Platform removed"
+
+# Everything in $(NAMESPACE): golden images, installer ISOs, and whatever a
+# Packer build left behind.
+#
+# The virt-launcher pods go FIRST and by force. A build VM whose guest never
+# booted ignores ACPI shutdown, so its pod hangs in Terminating; while it lives,
+# virt-controller keeps re-adding the VMI finalizers and every delete below
+# blocks. Strip the finalizers only once the pods are gone, or they come back.
+clean-all: clean ## Also delete golden images, ISOs, and every leftover VM/DV/PVC
+	@kubectl get pod -n $(NAMESPACE) -l kubevirt.io=virt-launcher -o name 2>/dev/null \
+		| xargs -r kubectl delete -n $(NAMESPACE) --force --grace-period=0 --wait=false
+	@for v in $$(kubectl get vmi -n $(NAMESPACE) -o name 2>/dev/null); do \
+		kubectl patch $$v -n $(NAMESPACE) --type=merge \
+			-p '{"metadata":{"finalizers":null}}' 2>/dev/null || true; \
+	done
+	@kubectl get vm,vmi -n $(NAMESPACE) -o name 2>/dev/null \
+		| xargs -r kubectl delete -n $(NAMESPACE) --force --grace-period=0 --ignore-not-found
+	kubectl delete datasource --all -n $(NAMESPACE) --ignore-not-found
+	kubectl delete dv --all -n $(NAMESPACE) --ignore-not-found
+	kubectl delete pvc --all -n $(NAMESPACE) --ignore-not-found
+	$(SAY) "Golden images, ISOs, and all VM artifacts removed"
+
+clean-cluster: ## Delete the kind cluster outright (full reset)
+	kind delete cluster
+	$(SAY) "Cluster deleted — start again with: make cluster"
+
+.PHONY: help preflight cluster build load-kind packer-init-local golden-ubuntu \
+        prepare-windows-iso golden-windows setup-rbac check-namespace check-golden \
+        deploy-guacamole deploy status urls logs vm vm-url vm-delete vm-serve clean clean-all clean-cluster
