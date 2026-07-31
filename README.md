@@ -120,3 +120,109 @@ make clean-golden-windows    # force-clean a stuck Packer build (run after Ctrl+
 
 ---
 
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| [pool-go/](pool-go/) | The Go control plane: `cmd/api` (chi HTTP API) and `cmd/controller` (controller-runtime reconciler), with `internal/` packages for config, pool manifests, session storage, and the Guacamole client |
+| [deploy/](deploy/) | Kubernetes manifests — controller, API, portal, Redis, Guacamole stack, RBAC |
+| [golden/](golden/) | Packer templates and provisioning scripts for the Ubuntu and Windows golden images |
+| [portal/](portal/) | Static student portal (nginx + a single `index.html`), which also reverse-proxies `/guacamole/` same-origin so the `?token=` auto-login works |
+| [scripts/](scripts/) | Cluster bootstrap script |
+
+---
+
+## Golden images
+
+Ubuntu builds unattended from the public 24.04 ISO with no manual steps.
+
+Windows needs media you supply yourself. Place a Windows 10 22H2 x64 ISO at
+`disk/Win10_22H2_EnglishInternational_x64v1.iso`, then run `make prepare-windows-iso`, which injects
+`Autounattend.xml` into both the ISO root and `sources/` and switches the image to a no-prompt EFI
+boot. The `disk/` directory is gitignored; installation media never belongs in version control.
+
+Getting a fully unattended Windows install onto KubeVirt took a long series of failed approaches —
+oemdrv disks, cloud-init, floppy attachment — before ISO injection worked. If you are fighting the
+same problem: the working combination is `Autounattend.xml` in **both** the ISO root and `sources/`,
+an `efisys.bin` no-prompt EFI boot image, and a Packer `boot_command` of `["<enter>"]`.
+
+### Packer plugin fork
+
+The upstream `hashicorp/packer-plugin-kubevirt` builder is missing a few things this pipeline needs
+(notably a configurable `media_files_label`, which Ubuntu's cloud-init requires to be `cidata` rather
+than `OEMDRV`, and UEFI firmware on the build VM). The fork lives in its own repository rather than
+being vendored here, and the golden-image targets clone it on demand — no manual step:
+
+```bash
+make packer-init-local    # clones the fork if absent, builds it, installs the plugin
+```
+
+Both `make golden-ubuntu` and `make golden-windows` depend on this target, so a fresh clone of this
+repository needs nothing extra. If `packer-plugin-kubevirt/` already exists it is left untouched —
+nothing pulls or resets it — so building from a dirty working tree is supported. Point it elsewhere
+with `PLUGIN_REPO`, `PLUGIN_REF`, or `PLUGIN_DIR`.
+
+The plugin installs under the name `github.com/hashicorp/kubevirt`, which is what the
+`required_plugins` blocks in `golden/*/*.pkr.hcl` resolve against — that name is deliberate, not a
+mistake. The fork carries three changes that this pipeline depends on:
+
+| Change | Why |
+|---|---|
+| `media_files_label` config field | Ubuntu cloud-init looks for a `cidata`-labelled disk, not the builder's hardcoded `OEMDRV` |
+| UEFI firmware on the build VM | Pool VMs boot UEFI; if the install VM does not match, Ubuntu installs a BIOS bootloader that never boots |
+| Pre-existing resource cleanup | A failed run leaves an orphaned DataVolume/DataSource behind, which blocks the next run until deleted by hand |
+
+---
+
+## Security and known gaps
+
+This is a proof of concept. Do not deploy it anywhere that is not an isolated lab network. Every
+item below is a known, open gap rather than an undiscovered bug.
+
+**Security**
+
+- The provisioning API is **unauthenticated**, and `DELETE /session/{id}` and `/status` are not
+  scoped to the requesting student, so `/status` leaking session IDs makes deletion trivially
+  reachable by anyone who can hit the API.
+- No NetworkPolicy and no TLS — the portal serves plain HTTP, and the Guacamole auth token travels
+  in the URL.
+- Credentials in this repository (`Lab@2024!`, `Lab@2024`, `guacamole_pass`, `rootpass`, `ubuntu`)
+  are **throwaway lab values committed deliberately so the lab reproduces**. They are not secrets
+  and are not used anywhere real. Replace them with Kubernetes Secrets before any deployment you
+  care about.
+- Desktops share one credential per OS and auto-login, so there is no OS-level isolation between
+  students.
+
+**Correctness and reliability**
+
+- There is **no session reaper**. A student who closes the browser tab strands a VM until it is
+  cleaned up out-of-band, and the controller spawns a replacement — so capacity leaks every class.
+- Claiming a VM is **not atomic**: if building the access URL fails after the label patch, nothing
+  rolls it back, and a failed session write is logged rather than returned.
+- Redis has no persistence, so a Redis restart strands every active session.
+- Single replica of everything, no resource requests or limits, and probes that report healthy
+  while dependencies are down.
+- Mutable `:v1` image tags with `imagePullPolicy: Never` — kind-only, with no registry or rollback
+  path — and containers run as root.
+- No automated tests.
+
+**Closed by the Guacamole unification:** Ubuntu desktops are no longer exposed on an
+unauthenticated NodePort. Both OS types now sit behind Guacamole on a ClusterIP, and the VNC server
+requires a password.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a PR:
+
+```bash
+gofmt -l pool-go          # must print nothing
+cd pool-go && go build ./... && go vet ./...
+```
+
+## License
+
+[Apache License 2.0](LICENSE).
+
+The Packer plugin fork is a separate repository under its own upstream license (MPL-2.0).
