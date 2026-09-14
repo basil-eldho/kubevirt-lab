@@ -93,19 +93,28 @@ preflight-windows:
 		printf '\033[1;33m! missing:%s\033[0m\n' "$$missing"; \
 		printf '  Debian/Ubuntu: sudo apt-get install -y%s\n' "$$missing"; exit 1; fi
 
-# Autounattend.xml goes in both places: sources/ for the windowsPE pass, root
-# for setup. One shell so the trap survives every step; a private mktemp -d
-# rather than /mnt, which would clobber whatever is already mounted there.
-# Needs sudo — mounting the source ISO is the only way to read its contents.
-prepare-windows-iso: preflight-windows ## Inject Autounattend.xml into the Windows ISO
+check-win-iso:
 	@if [ ! -f "$(WIN_ISO_SRC)" ]; then \
 		printf '\033[1;33m! Windows ISO not found at %s\n' "$(WIN_ISO_SRC)"; \
 		printf '  Optional — Ubuntu-only needs nothing here. Drop a Windows 10 22H2\n'; \
 		printf '  x64 ISO in disk/, or pass WIN_ISO_SRC=/path/to.iso\033[0m\n'; \
 		exit 1; fi
+
+# A real file target rather than a phony one, so a second `make golden-windows` —
+# after a failed Packer build, say — does not repack 6 GB and ask for sudo again
+# for nothing. Rebuilt only when the source ISO or the answer file is newer.
+#
+# Autounattend.xml goes in both places: sources/ for the windowsPE pass, root for
+# setup. One shell so the trap survives every step; a private mktemp -d rather
+# than /mnt, which would clobber whatever is already mounted there. Needs sudo —
+# mounting the source ISO is the only way to read its contents.
+#
+# xorriso writes to .tmp and the result is moved into place, so an interrupted run
+# cannot leave a truncated ISO that looks newer than its source and gets skipped.
+$(WIN_ISO_OUT): $(WIN_ISO_SRC) golden/windows/autounattend.xml
 	@set -e; \
 	mnt=$$(mktemp -d); ext=$$(mktemp -d); \
-	trap 'sudo umount "$$mnt" 2>/dev/null || true; rmdir "$$mnt" 2>/dev/null || true; rm -rf "$$ext"' EXIT; \
+	trap 'sudo umount "$$mnt" 2>/dev/null || true; rmdir "$$mnt" 2>/dev/null || true; rm -rf "$$ext"; rm -f "$(WIN_ISO_OUT).tmp"' EXIT; \
 	printf '\033[0;32m▸ %s\033[0m\n' "Repacking Windows ISO with Autounattend.xml"; \
 	sudo mount -o loop,ro "$(WIN_ISO_SRC)" "$$mnt"; \
 	rsync -a "$$mnt"/ "$$ext"/; \
@@ -121,9 +130,12 @@ prepare-windows-iso: preflight-windows ## Inject Autounattend.xml into the Windo
 		-eltorito-alt-boot -eltorito-platform efi \
 		-b efi/microsoft/boot/efisys.bin -no-emul-boot \
 		-V "CCCOMA_X64FRE_EN-GB_DV9" \
-		-o "$(WIN_ISO_OUT)" \
-		"$$ext"
+		-o "$(WIN_ISO_OUT).tmp" \
+		"$$ext"; \
+	mv "$(WIN_ISO_OUT).tmp" "$(WIN_ISO_OUT)"
 	$(SAY) "Unattended ISO ready: $(WIN_ISO_OUT)"
+
+prepare-windows-iso: preflight-windows check-win-iso $(WIN_ISO_OUT) ## Inject Autounattend.xml into the Windows ISO
 
 golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golden image (~45 min)
 	kubectl delete dv windows-iso --ignore-not-found
@@ -132,7 +144,7 @@ golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golde
 	kubectl apply -f golden/windows/iso-dv.yaml
 	kubectl wait --for=jsonpath='{.status.phase}'=UploadReady dv/windows-iso --timeout=5m
 	$(SAY) "Uploading the Windows ISO — takes a few minutes"
-	# Kill the forward by its own PID and let a failed upload fail the target.
+	@# Kill the forward by its own PID and let a failed upload fail the target.
 	@set -e; \
 	kubectl port-forward -n cdi svc/cdi-uploadproxy 18443:443 & \
 	pf=$$!; \
@@ -192,13 +204,15 @@ check-golden: check-os
 		printf '\033[1;33m! DataSource "%s" missing — run: make golden-$(OS)\033[0m\n' '$(DATASOURCE)'; \
 		exit 1; }
 
+# The wait below is on the VM, not the VMI: the VMI does not exist until the disk
+# clone finishes, and `kubectl wait` errors out on an object that is not there yet.
+# Readiness means the guest agent has checked in; vm-connect.sh then waits for the
+# desktop itself to answer. Comments stay out of the recipe so make does not echo
+# them into the middle of the output.
 vm: check-golden serve ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
 	@if [ "$(OS)" = windows ]; then kubectl apply -f deploy/windows-pool-unattend.yaml; fi
 	sed -e 's/__NAME__/$(NAME)/g' -e 's/__DATASOURCE__/$(DATASOURCE)/g' deploy/vm-$(OS).yaml | kubectl apply -f -
 	$(SAY) "Cloning the golden disk — a few minutes"
-	# Wait on the VM, not the VMI: the VMI does not exist until the clone
-	# finishes, and kubectl wait errors on a missing object. vm-connect.sh then
-	# waits for the desktop itself to answer.
 	kubectl wait --for=condition=Ready vm/$(NAME) -n $(NAMESPACE) --timeout=15m
 	$(SAY) "Waiting for the desktop to come up"
 	@./scripts/vm-connect.sh $(NAME) $(OS)
@@ -272,5 +286,5 @@ clean-cluster: ## Delete the kind cluster outright (full reset)
 	$(SAY) "Cluster deleted — start again with: make cluster"
 
 .PHONY: help preflight cluster packer-init-local golden-ubuntu preflight-windows \
-        prepare-windows-iso golden-windows check-namespace check-os check-golden \
+        check-win-iso prepare-windows-iso golden-windows check-namespace check-os check-golden \
         serve vm vm-url vm-delete status urls console clean clean-all clean-cluster
