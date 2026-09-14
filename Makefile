@@ -1,21 +1,21 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-# Warm VMs per OS. Windows is opt-in — it needs the ~45 min golden build first,
-# and pooling it without one leaves VMs cloning a DataSource that does not exist.
-MIN_POOL_UBUNTU  ?= 1
-MIN_POOL_WINDOWS ?= 1
-
-# Defaults for the standalone VM targets: make vm / vm-url / vm-delete.
+# Defaults for the VM targets: make vm / vm-url / vm-delete / console.
 OS   ?= ubuntu
 NAME ?= lab1
 
-# Golden DataVolume/DataSource names that pool VMs clone from.
+# Golden DataVolume/DataSource names that VMs clone from.
 GOLDEN_UBUNTU    ?= ubuntu-golden
 GOLDEN_WINDOWS   ?= windows-golden
 
+# The image the requested OS clones from. One expansion keeps the OS-to-image
+# mapping in a single place; check-os rejects any other OS before this is used.
+DATASOURCE = $(if $(filter windows,$(OS)),$(GOLDEN_WINDOWS),$(GOLDEN_UBUNTU))
+
 # Golden builds and cleanup honour this; deploy/ hardcodes `namespace: default`,
-# so check-namespace refuses anything else rather than splitting the platform.
+# so check-namespace refuses anything else rather than splitting the setup
+# across two namespaces that cannot see each other's DataSources.
 NAMESPACE        ?= default
 
 WIN_ISO_SRC ?= $(CURDIR)/disk/Win10_22H2_EnglishInternational_x64v1.iso
@@ -29,6 +29,12 @@ PLUGIN_DIR  ?= $(CURDIR)/packer-plugin-kubevirt
 # the upstream name is what makes those templates resolve to it.
 PLUGIN_SOURCE := github.com/hashicorp/kubevirt
 
+# xorriso and rsync repack the Windows installer ISO. They are checked in
+# preflight-windows rather than preflight, so an Ubuntu-only run that never
+# touches either is not blocked on installing them.
+CORE_TOOLS := docker kind kubectl packer virtctl git go
+WIN_TOOLS  := xorriso rsync
+
 # Progress lines. Keep messages free of '%' — these are printf formats.
 SAY  := @printf '\033[0;32m▸ %s\033[0m\n'
 WARN := @printf '\033[1;33m! %s\033[0m\n'
@@ -36,20 +42,20 @@ WARN := @printf '\033[1;33m! %s\033[0m\n'
 NODE_IP = $$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 
 help: ## Show this help
-	@printf '\n  \033[1mKubeVirt Lab Platform\033[0m — warm-pool Ubuntu + Windows desktops\n'
+	@printf '\n  \033[1mKubeVirt VM lab\033[0m — Ubuntu and Windows desktops in a browser\n'
 	@awk 'BEGIN {FS = ":.*##"} \
 		/^##@/ { printf "\n  \033[1m%s\033[0m\n", substr($$0, 5) } \
 		/^[a-zA-Z0-9_-]+:.*##/ { printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@printf '\n  \033[1mFirst run, in order:\033[0m\n'
-	@printf '    make cluster          # kind + KubeVirt + CDI\n'
-	@printf '    make golden-ubuntu    # one-time, ~20 min\n'
-	@printf '    make deploy && make urls\n'
-	@printf '\n  \033[1mAdd Windows later:\033[0m  make golden-windows && make deploy MIN_POOL_WINDOWS=1\n\n'
+	@printf '    make cluster                    # kind + KubeVirt + CDI, ~10 min\n'
+	@printf '    make golden-ubuntu              # one-time Packer build, ~20 min\n'
+	@printf '    make vm OS=ubuntu NAME=ubuntu1  # prints a browser link\n'
+	@printf '\n  \033[1mAdd Windows:\033[0m  make golden-windows && make vm OS=windows NAME=win1\n\n'
 
 ##@ Setup
 
-preflight: ## Check that required tools are installed
-	@missing=; for t in docker kind kubectl packer virtctl xorriso git go rsync lsof; do \
+preflight: ## Check that the required tools are installed
+	@missing=; for t in $(CORE_TOOLS); do \
 		command -v $$t >/dev/null || missing="$$missing $$t"; done; \
 	if [ -n "$$missing" ]; then printf '\033[1;33m! missing:%s\033[0m\n' "$$missing"; exit 1; fi
 	$(SAY) "All required tools present"
@@ -79,10 +85,19 @@ golden-ubuntu: packer-init-local ## Build the Ubuntu golden image (~20 min)
 		ubuntu.pkr.hcl
 	$(SAY) "Ubuntu golden image ready — DataSource $(GOLDEN_UBUNTU)"
 
+# Internal guard, invoked by prepare-windows-iso. Not in `make help`.
+preflight-windows:
+	@missing=; for t in $(WIN_TOOLS); do \
+		command -v $$t >/dev/null || missing="$$missing $$t"; done; \
+	if [ -n "$$missing" ]; then \
+		printf '\033[1;33m! missing:%s\033[0m\n' "$$missing"; \
+		printf '  Debian/Ubuntu: sudo apt-get install -y%s\n' "$$missing"; exit 1; fi
+
 # Autounattend.xml goes in both places: sources/ for the windowsPE pass, root
 # for setup. One shell so the trap survives every step; a private mktemp -d
 # rather than /mnt, which would clobber whatever is already mounted there.
-prepare-windows-iso: ## Inject Autounattend.xml into the Windows ISO
+# Needs sudo — mounting the source ISO is the only way to read its contents.
+prepare-windows-iso: preflight-windows ## Inject Autounattend.xml into the Windows ISO
 	@if [ ! -f "$(WIN_ISO_SRC)" ]; then \
 		printf '\033[1;33m! Windows ISO not found at %s\n' "$(WIN_ISO_SRC)"; \
 		printf '  Optional — Ubuntu-only needs nothing here. Drop a Windows 10 22H2\n'; \
@@ -136,112 +151,50 @@ golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golde
 		windows.pkr.hcl
 	$(SAY) "Windows golden image ready — DataSource $(GOLDEN_WINDOWS)"
 
-##@ Deploy
+##@ Run VMs
 
-# Listed in the order `deploy` runs them: guards first (they fail in seconds),
-# then the image build, then the cluster objects.
-check-namespace: ## Refuse a NAMESPACE the deploy manifests cannot honour
+# Internal guards for the targets below. Kept out of `make help`: nobody runs
+# them directly, and they would crowd out the commands that matter.
+check-namespace:
 	@if [ "$(NAMESPACE)" != "default" ]; then \
 		printf '\033[1;33m! NAMESPACE=%s unsupported: deploy/ hardcodes `namespace: default`,\n' '$(NAMESPACE)'; \
-		printf '  so the platform and the golden images would land in different places.\033[0m\n'; \
+		printf '  so the manifests and the golden images would land in different places.\033[0m\n'; \
 		exit 1; fi
 
-# Without the DataSource the controller still creates VMs; their clone just
-# never resolves and the pool sits at zero with nothing obvious in the logs.
-# Only enabled pools are checked, so Ubuntu-only needs no Windows image.
-check-golden: ## Verify the golden DataSources the enabled pools need
-	@rc=0; \
-	ready() { kubectl get datasource "$$1" -n $(NAMESPACE) \
-		-o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -qx True; }; \
-	if [ "$(MIN_POOL_UBUNTU)" -gt 0 ] 2>/dev/null && ! ready $(GOLDEN_UBUNTU); then \
-		printf '\033[1;33m! Ubuntu pool is %s but DataSource "%s" is missing or not ready\n  Run: make golden-ubuntu\033[0m\n' \
-			'$(MIN_POOL_UBUNTU)' '$(GOLDEN_UBUNTU)'; rc=1; \
-	fi; \
-	if [ "$(MIN_POOL_WINDOWS)" -gt 0 ] 2>/dev/null && ! ready $(GOLDEN_WINDOWS); then \
-		printf '\033[1;33m! Windows pool is %s but DataSource "%s" is missing or not ready\n  Run: make golden-windows\033[0m\n' \
-			'$(MIN_POOL_WINDOWS)' '$(GOLDEN_WINDOWS)'; rc=1; \
-	fi; \
-	exit $$rc
-
-build: ## Build the controller and API images
-	docker build --target controller -t pool-controller:v1 pool-go/
-	docker build --target api -t pool-api:v1 pool-go/
-
-load-kind: build ## Build, then load images into the kind node
-	kind load docker-image pool-controller:v1
-	kind load docker-image pool-api:v1
-	$(SAY) "Images loaded into kind"
-
-setup-rbac: ## Apply the controller ServiceAccount and RBAC
-	kubectl apply -f deploy/rbac.yaml
-
-deploy-guacamole: ## Deploy the Guacamole stack (MySQL, guacd, Guacamole)
+# Guacamole plus the nginx proxy in front of it. A prerequisite of `vm`, because
+# the desktop link is useless until both are up and forgetting this step yields a
+# connection error that explains nothing.
+#
+# Deliberately no `rollout restart`: this runs on every `make vm`, and bouncing
+# the proxy would drop the tunnel of any desktop already open in a browser. Edit
+# portal/nginx.conf and you have to restart the Deployment yourself.
+serve: check-namespace ## Deploy Guacamole and the proxy that publishes it
 	kubectl apply -f deploy/guacamole.yaml
 	$(WARN) "Waiting for MySQL — the first start runs schema init"
 	kubectl wait --for=condition=Ready pod -l app=mysql --timeout=3m
 	kubectl wait --for=condition=Ready pod -l app=guacamole --timeout=2m
-
-# load-kind is a prerequisite because the manifests use imagePullPolicy: Never —
-# the images must be on the node already or the pods hit ErrImageNeverPull.
-deploy: check-namespace check-golden load-kind setup-rbac deploy-guacamole ## Deploy the controller, API, and portal
-	kubectl apply -f deploy/redis.yaml
-	kubectl wait --for=condition=Ready pod -l app=redis --timeout=60s
-	kubectl apply -f deploy/windows-pool-unattend.yaml
-	kubectl apply -f deploy/controller.yaml
-	# Set unconditionally: comparing against controller.yaml's defaults first
-	# would rot silently the moment either default is edited.
-	kubectl set env deployment/pool-controller \
-		MIN_POOL_UBUNTU=$(MIN_POOL_UBUNTU) MIN_POOL_WINDOWS=$(MIN_POOL_WINDOWS) \
-		DATASOURCE_UBUNTU=$(GOLDEN_UBUNTU) DATASOURCE_WINDOWS=$(GOLDEN_WINDOWS)
-	kubectl apply -f deploy/api.yaml
-	kubectl create configmap portal-html --from-file=index.html=portal/index.html \
-		--dry-run=client -o yaml | kubectl apply -f -
-	kubectl create configmap portal-nginx-conf --from-file=nginx.conf=portal/nginx.conf \
-		--dry-run=client -o yaml | kubectl apply -f -
-	kubectl apply -f deploy/portal.yaml
-	$(SAY) "Deployed (ubuntu=$(MIN_POOL_UBUNTU), windows=$(MIN_POOL_WINDOWS)). Warm in 3-8 min: make status"
-
-##@ Operate
-
-status: ## Show pool depth and active sessions
-	@printf '\n\033[1mPool VMs\033[0m\n'
-	@kubectl get vm -l managed-by=pool-controller \
-		-o custom-columns='NAME:.metadata.name,TYPE:.metadata.labels.pool-type,STATE:.metadata.labels.pool,VMI:.status.printableStatus' \
-		2>/dev/null || echo "  none"
-	@printf '\n\033[1mAPI\033[0m\n'
-	@curl -s "http://$(NODE_IP):30001/status" 2>/dev/null | python3 -m json.tool 2>/dev/null \
-		|| echo "  not reachable yet"
-
-urls: ## Print the portal and API URLs
-	@ip=$(NODE_IP); \
-	printf '\n  Student portal  http://%s:30000\n'   "$$ip"; \
-	printf '  API status      http://%s:30001/status\n' "$$ip"; \
-	printf '  Guacamole admin http://%s:30000/guacamole/\n\n' "$$ip"
-
-logs: ## Tail the pool controller logs
-	kubectl logs -f deployment/pool-controller
-
-##@ Standalone VMs (no pool controller or API)
-
-# Guacamole plus the portal's nginx — that proxy carries the WebSocket upgrade
-# the token URL depends on. The controller, provisioning API and Redis are not
-# involved. Safe to run alongside the full platform: these VMs are labelled
-# app=lab-vm, so the pool controller ignores them and `make clean` spares them.
-vm-serve: deploy-guacamole ## Deploy only what browser access needs (Guacamole + portal)
-	kubectl create configmap portal-html --from-file=index.html=portal/index.html \
-		--dry-run=client -o yaml | kubectl apply -f -
 	kubectl create configmap portal-nginx-conf --from-file=nginx.conf=portal/nginx.conf \
 		--dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f deploy/portal.yaml
 	kubectl wait --for=condition=Ready pod -l app=student-portal --timeout=2m
 
-vm: ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
-	@case "$(OS)" in ubuntu) ds=$(GOLDEN_UBUNTU);; windows) ds=$(GOLDEN_WINDOWS);; \
-		*) printf '\033[1;33m! OS must be ubuntu or windows\033[0m\n'; exit 1;; esac; \
-	kubectl get datasource $$ds -n $(NAMESPACE) >/dev/null 2>&1 || { \
-		printf '\033[1;33m! DataSource "%s" missing — run: make golden-$(OS)\033[0m\n' "$$ds"; exit 1; }; \
-	if [ "$(OS)" = windows ]; then kubectl apply -f deploy/windows-pool-unattend.yaml; fi; \
-	sed -e 's/__NAME__/$(NAME)/g' -e "s/__DATASOURCE__/$$ds/g" deploy/vm-$(OS).yaml | kubectl apply -f -
+# Anything other than ubuntu or windows would otherwise fail later and less
+# clearly, on a `deploy/vm-$(OS).yaml` that does not exist.
+check-os:
+	@case "$(OS)" in ubuntu|windows) ;; *) \
+		printf '\033[1;33m! OS must be ubuntu or windows (got "%s")\033[0m\n' '$(OS)'; \
+		exit 1;; esac
+
+# Checked before `serve` runs, so a missing image fails in a second rather than
+# after a three-minute wait on MySQL.
+check-golden: check-os
+	@kubectl get datasource $(DATASOURCE) -n $(NAMESPACE) >/dev/null 2>&1 || { \
+		printf '\033[1;33m! DataSource "%s" missing — run: make golden-$(OS)\033[0m\n' '$(DATASOURCE)'; \
+		exit 1; }
+
+vm: check-golden serve ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
+	@if [ "$(OS)" = windows ]; then kubectl apply -f deploy/windows-pool-unattend.yaml; fi
+	sed -e 's/__NAME__/$(NAME)/g' -e 's/__DATASOURCE__/$(DATASOURCE)/g' deploy/vm-$(OS).yaml | kubectl apply -f -
 	$(SAY) "Cloning the golden disk — a few minutes"
 	# Wait on the VM, not the VMI: the VMI does not exist until the clone
 	# finishes, and kubectl wait errors on a missing object. vm-connect.sh then
@@ -253,26 +206,45 @@ vm: ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
 vm-url: ## Reprint a VM's browser link with a fresh token (NAME=lab1 OS=ubuntu)
 	@./scripts/vm-connect.sh $(NAME) $(OS)
 
-vm-delete: ## Delete a standalone VM, its disk and its Service (NAME=lab1)
+vm-delete: ## Delete one VM, its disk and its Service (NAME=lab1)
 	kubectl delete vm $(NAME) -n $(NAMESPACE) --ignore-not-found
 	kubectl delete dv $(NAME)-disk -n $(NAMESPACE) --ignore-not-found
 	kubectl delete svc desktop-$(NAME) -n $(NAMESPACE) --ignore-not-found
 	$(WARN) "Guacamole connection '$(NAME)' and user 'lab-vm-$(NAME)' left in place — remove them in the admin UI"
-	
+
+##@ Operate
+
+status: ## List the VMs this repo created and their state
+	@printf '\n\033[1mVMs\033[0m\n'
+	@kubectl get vm -l app=lab-vm -n $(NAMESPACE) \
+		-o custom-columns='NAME:.metadata.name,OS:.metadata.labels.lab-vm-os,STATE:.status.printableStatus' \
+		2>/dev/null || echo "  none"
+	@printf '\n\033[1mGolden images\033[0m\n'
+	@kubectl get datasource -n $(NAMESPACE) \
+		-o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status' \
+		2>/dev/null || echo "  none"
+	@printf '\n'
+
+urls: ## Print the Guacamole URL
+	@ip=$(NODE_IP); \
+	printf '\n  Guacamole       http://%s:30000/guacamole/\n'   "$$ip"; \
+	printf '  Admin login     guacadmin / guacadmin\n'; \
+	printf '  Desktop link    make vm-url NAME=lab1 OS=ubuntu\n\n'
+
+console: ## Open a serial console on a VM, to debug a black screen (NAME=lab1)
+	virtctl console $(NAME) -n $(NAMESPACE)
+
 ##@ Cleanup
 
-clean: ## Remove the platform and pool VMs, keeping golden images
-	kubectl delete deployment pool-controller provisioning-api student-portal redis --ignore-not-found
-	kubectl delete svc provisioning-api student-portal redis --ignore-not-found
-	kubectl delete configmap portal-html portal-nginx-conf --ignore-not-found
-	@kubectl get vm -l managed-by=pool-controller -o name 2>/dev/null | xargs -r kubectl delete
-	@kubectl get svc -l managed-by=pool-controller -o name 2>/dev/null | xargs -r kubectl delete
+clean: ## Delete every VM, plus Guacamole and the proxy; keep golden images
+	@kubectl get vm -l app=lab-vm -n $(NAMESPACE) -o name 2>/dev/null | xargs -r kubectl delete -n $(NAMESPACE)
+	@kubectl get svc -l app=lab-vm -n $(NAMESPACE) -o name 2>/dev/null | xargs -r kubectl delete -n $(NAMESPACE)
+	kubectl delete deployment student-portal --ignore-not-found
+	kubectl delete svc student-portal --ignore-not-found
+	kubectl delete configmap portal-nginx-conf windows-pool-unattend --ignore-not-found
 	kubectl delete -f deploy/guacamole.yaml --ignore-not-found
 	kubectl delete pvc mysql-data --ignore-not-found
-	kubectl delete clusterrolebinding pool-controller --ignore-not-found
-	kubectl delete clusterrole pool-controller --ignore-not-found
-	kubectl delete sa pool-controller --ignore-not-found
-	$(SAY) "Platform removed"
+	$(SAY) "VMs and browser access removed — golden images kept"
 
 # Everything in $(NAMESPACE): golden images, installer ISOs, and whatever a
 # Packer build left behind.
@@ -299,6 +271,6 @@ clean-cluster: ## Delete the kind cluster outright (full reset)
 	kind delete cluster
 	$(SAY) "Cluster deleted — start again with: make cluster"
 
-.PHONY: help preflight cluster build load-kind packer-init-local golden-ubuntu \
-        prepare-windows-iso golden-windows setup-rbac check-namespace check-golden \
-        deploy-guacamole deploy status urls logs vm vm-url vm-delete vm-serve clean clean-all clean-cluster
+.PHONY: help preflight cluster packer-init-local golden-ubuntu preflight-windows \
+        prepare-windows-iso golden-windows check-namespace check-os check-golden \
+        serve vm vm-url vm-delete status urls console clean clean-all clean-cluster

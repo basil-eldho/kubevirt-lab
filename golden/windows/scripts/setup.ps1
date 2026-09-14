@@ -1,6 +1,6 @@
 # Runs via Packer WinRM provisioner AFTER autounattend.xml has finished.
 # At this point: VirtIO drivers installed, WinRM open, OS fully set up.
-# Creates the student lab user and applies lab-specific settings.
+# Creates the desktop login account and applies lab-specific settings.
 #Requires -RunAsAdministrator
 
 Set-StrictMode -Version Latest
@@ -9,7 +9,8 @@ $ErrorActionPreference = "Stop"
 $StudentUser = "student"
 $StudentPass = "Lab@2024!"
 
-# Create student user (what pool VMs expose to students via RDP)
+# The account Guacamole logs in with over RDP. Same credentials appear in
+# scripts/vm-connect.sh — change both together or the desktop link breaks.
 $SecurePass = ConvertTo-SecureString $StudentPass -AsPlainText -Force
 New-LocalUser -Name $StudentUser -Password $SecurePass `
     -FullName "Lab Student" -PasswordNeverExpires -UserMayNotChangePassword
@@ -21,7 +22,7 @@ Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' 
     -Name 'fDenyTSConnections' -Value 0
 Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
 
-# Disable Windows Update (prevents downloads during student sessions)
+# Disable Windows Update (prevents downloads during a desktop session)
 Stop-Service  -Name wuauserv -Force -ErrorAction SilentlyContinue
 Set-Service   -Name wuauserv -StartupType Disabled
 
@@ -29,11 +30,12 @@ Set-Service   -Name wuauserv -StartupType Disabled
 # forces a Microsoft account when network is present).
 reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f
 
-# Replace the Packer answer file cached in Panther with the pool OOBE answer file.
+# Replace the Packer answer file cached in Panther with the OOBE answer file that
+# cloned VMs boot with.
 # sysprep /generalize moves (not deletes) C:\Windows\Panther\unattend.xml →
 # C:\Windows\Panther\Unattend\unattend.xml. OOBE finds Panther\Unattend first,
 # before scanning removable media, so this is the reliable path per MS docs.
-$poolUnattend = @'
+$oobeUnattend = @'
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -78,7 +80,7 @@ $poolUnattend = @'
 </unattend>
 '@
 New-Item -Path "$env:SystemRoot\Panther" -ItemType Directory -Force | Out-Null
-Set-Content -Path "$env:SystemRoot\Panther\unattend.xml" -Value $poolUnattend -Encoding UTF8
+Set-Content -Path "$env:SystemRoot\Panther\unattend.xml" -Value $oobeUnattend -Encoding UTF8
 
 Write-Host "Lab setup complete. Student user '$StudentUser' created."
 

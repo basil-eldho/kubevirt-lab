@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Publish a standalone VM's desktop through Guacamole and print an auto-login URL.
+# Publish a VM's desktop through Guacamole and print an auto-login URL.
 #
 # Usage: ./scripts/vm-connect.sh <vm-name> <ubuntu|windows>
+#        make vm-url NAME=<vm-name> OS=<ubuntu|windows>
 #
-# Idempotent — safe to re-run for a fresh token. Needs `make vm-serve` first: the
-# URL only works through the portal's nginx, which adds the WebSocket upgrade
-# headers Guacamole's tunnel requires.
+# `make vm` runs this at the end, so it is rarely called directly — reach for it
+# when a token has expired and you want a fresh link.
+#
+# Idempotent, but it needs Guacamole and the nginx proxy running (`make serve`,
+# which `make vm` depends on). The URL only works through that proxy, which adds
+# the WebSocket upgrade headers Guacamole's tunnel requires.
 
 set -euo pipefail
 

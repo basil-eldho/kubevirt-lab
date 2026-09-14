@@ -6,7 +6,8 @@
 # VirtIO drivers (storage, network, balloon, etc.)
 Start-Process msiexec -Wait -ArgumentList "/i E:\virtio-win-gt-x64.msi /qn /passive /norestart"
 
-# QEMU guest agent — enables AgentConnected condition in pool controller
+# QEMU guest agent — makes the VMI report AgentConnected, which is how KubeVirt
+# (and `kubectl wait --for=condition=Ready vm/...`) knows the guest is really up
 Start-Process msiexec -Wait -ArgumentList "/i E:\guest-agent\qemu-ga-x86_64.msi /qn /passive /norestart"
 
 # Rename cached unattend.xml so sysprep doesn't re-apply it

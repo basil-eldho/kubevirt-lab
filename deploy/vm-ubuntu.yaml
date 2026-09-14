@@ -1,8 +1,14 @@
-# Standalone Ubuntu VM cloned from the golden image — no pool controller, no API,
-# no Guacamole. `make vm OS=ubuntu` substitutes __NAME__ and __DATASOURCE__.
+# An Ubuntu desktop VM, cloned from the golden image built by `make golden-ubuntu`.
+# `make vm OS=ubuntu NAME=lab1` substitutes __NAME__ and __DATASOURCE__ and applies
+# the result, so this file is a template and not directly applyable.
 #
-# Deliberately NOT labelled managed-by=pool-controller: that label would make the
-# pool controller count this VM toward MinSize and make `make clean` delete it.
+# The disk is a copy-on-write clone of the golden PVC, which is why a VM starts in
+# a couple of minutes instead of running an OS installer. Everything the desktop
+# needs — XFCE, autologin, x11vnc on :5900 — is already inside that image; see
+# golden/ubuntu/scripts/setup-desktop.sh.
+#
+# app=lab-vm is what `make status`, `make clean` and the desktop Service selector
+# match on. Keep it if you copy this file.
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:

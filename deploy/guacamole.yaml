@@ -126,8 +126,8 @@ spec:
     targetPort: 4822
 ---
 # ── Guacamole web app ─────────────────────────────────────────────────────────
-# No NodePort — students reach it via the portal's NGINX proxy at /guacamole/
-# (same origin, which is required for the ?token= auto-login URL to work)
+# No NodePort — reached through the nginx proxy in deploy/portal.yaml at
+# /guacamole/ (same origin, which the ?token= auto-login URL requires)
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -1,7 +1,10 @@
-# Pool VM Windows answer file.
-# Mounted as a KubeVirt sysprep volume on every Windows pool VM so that the
-# cloned golden image (sysprep'd with /oobe) boots straight to the student
-# desktop instead of showing the OOBE wizard.
+# Windows first-boot answer file.
+# Mounted as a KubeVirt sysprep volume on every Windows VM so that the cloned
+# golden image (sysprep'd with /oobe) boots straight to the desktop, logged in
+# as `student`, instead of stopping at the OOBE setup wizard.
+#
+# `make vm OS=windows` applies this for you. Without it a clone boots to a
+# region-select screen and waits for a human forever.
 apiVersion: v1
 kind: ConfigMap
 metadata:

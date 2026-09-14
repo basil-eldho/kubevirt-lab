@@ -1,13 +1,16 @@
-# Standalone Windows VM cloned from the golden image — no pool controller, no
-# API, no Guacamole. `make vm OS=windows` substitutes __NAME__ and __DATASOURCE__.
+# A Windows desktop VM, cloned from the golden image built by `make golden-windows`.
+# `make vm OS=windows NAME=win1` substitutes __NAME__ and __DATASOURCE__ and applies
+# the result, so this file is a template and not directly applyable.
 #
-# Deliberately NOT labelled managed-by=pool-controller: that label would make the
-# pool controller count this VM toward MinSize and make `make clean` delete it.
+# Two parts of this are load-bearing and easy to drop when adapting it:
 #
-# The sysprep volume is required. The golden image was sysprepped with /oobe, so
-# without an answer file the clone boots into the OOBE wizard instead of the
-# desktop. It reads the same ConfigMap the pool VMs use, applied by `make deploy`
-# — see the note in the vm target if you are running without the platform.
+#   * The sysprep volume. The golden image was sysprepped with /oobe, so without an
+#     answer file the clone boots into the OOBE setup wizard instead of the desktop.
+#     `make vm` applies deploy/windows-pool-unattend.yaml for you.
+#   * The hyperv enlightenments below. Windows runs acceptably slowly without them.
+#
+# app=lab-vm is what `make status`, `make clean` and the desktop Service selector
+# match on. Keep it if you copy this file.
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
