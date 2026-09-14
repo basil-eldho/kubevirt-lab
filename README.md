@@ -209,6 +209,14 @@ fighting the same problem, the working combination is:
 - a sysprep answer file mounted on every clone (`deploy/windows-pool-unattend.yaml`). The golden
   image is sysprepped with `/oobe`, so without it a clone stops at the region-select wizard.
 
+### Upgrading or recreating an image
+
+The Packer build creates the `ubuntu-golden` / `windows-golden` CDI `DataSource` itself, so there is
+nothing to apply by hand. Re-running `make golden-ubuntu` replaces both the DataVolume and the
+DataSource; VMs created afterwards clone the new image, while existing VMs keep the disk they already
+cloned. On a cluster backed by Ceph or another CSI with snapshot support, pointing the DataSource at
+a `snapshot` source rather than a `pvc` makes every clone instant — nothing else has to change.
+
 ### Packer plugin fork
 
 Upstream `hashicorp/packer-plugin-kubevirt` is missing a few things this pipeline needs, so the
