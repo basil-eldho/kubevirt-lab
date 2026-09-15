@@ -1,9 +1,8 @@
-# Windows ISO DataVolume — uploaded from local disk via virtctl.
-# After applying, upload with:
-#   virtctl image-upload dv windows-iso \
-#     --size=8Gi \
-#     --image-path=/home/sandworm/kubevirt/windows-10/Win10_22H2_EnglishInternational_x64v1.iso \
-#     --insecure
+# Windows ISO DataVolume — uploaded from the host via virtctl.
+# `make golden-windows` fetches (or reuses) the installer ISO, injects
+# Autounattend.xml, then image-uploads the repacked file here. Source is
+# `upload` rather than `http` because the media has to be mutated on the host
+# first; CDI cannot pull a public Microsoft URL the way it does Ubuntu.
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:

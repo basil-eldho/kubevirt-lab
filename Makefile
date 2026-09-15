@@ -1,25 +1,49 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-# Warm VMs per OS. Windows is opt-in — it needs the ~45 min golden build first,
-# and pooling it without one leaves VMs cloning a DataSource that does not exist.
-MIN_POOL_UBUNTU  ?= 1
-MIN_POOL_WINDOWS ?= 1
-
-# Defaults for the standalone VM targets: make vm / vm-url / vm-delete.
+# Defaults for the VM targets: make vm / vm-url / vm-delete / console.
 OS   ?= ubuntu
 NAME ?= lab1
 
-# Golden DataVolume/DataSource names that pool VMs clone from.
+# Golden DataVolume/DataSource/PVC names that VMs overlay.
 GOLDEN_UBUNTU    ?= ubuntu-golden
 GOLDEN_WINDOWS   ?= windows-golden
 
+# The golden PVC the requested OS overlays. One expansion keeps the OS-to-image
+# mapping in a single place; check-os rejects any other OS before this is used.
+# The Packer builds name the DataVolume, its PVC and its DataSource alike, so this
+# one name serves as both the readiness signal and the ephemeral claimName.
+GOLDEN = $(if $(filter windows,$(OS)),$(GOLDEN_WINDOWS),$(GOLDEN_UBUNTU))
+
 # Golden builds and cleanup honour this; deploy/ hardcodes `namespace: default`,
-# so check-namespace refuses anything else rather than splitting the platform.
+# so check-namespace refuses anything else rather than splitting the setup
+# across two namespaces that cannot see each other's DataSources.
 NAMESPACE        ?= default
 
-WIN_ISO_SRC ?= $(CURDIR)/disk/Win10_22H2_EnglishInternational_x64v1.iso
-WIN_ISO_OUT ?= $(CURDIR)/disk/Win10_22H2_unattended.iso
+# Windows installer media. Unlike the Ubuntu ISO, which CDI pulls from a stable
+# mirror inside the cluster, this one is downloaded on the host: it has to be
+# repacked with Autounattend.xml before anything can boot it.
+#
+# Default is the public Windows 10 22H2 Enterprise Evaluation ISO on Microsoft's
+# CDN — the same object Dockur pins. Retail FIDO links expire within a day;
+# this one does not. WIN_ISO_SRC is the cache: downloaded when absent, reused
+# afterwards. Drop your own ISO there (or pass WIN_ISO_SRC) and no fetch runs.
+# Override with WIN_ISO_URL=… ; prefer the env-var form, because a make
+# argument would expand '&' and '$' in signed URLs.
+DEFAULT_WIN_ISO_URL    := https://software-static.download.prss.microsoft.com/dbazure/988969d5-f34g-4e03-ac9d-1f9786c66750/19045.2006.220908-0225.22h2_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso
+DEFAULT_WIN_ISO_SHA256 := ef7312733a9f5d7d51cfa04ac497671995674ca5e1058d5164d6028f0938d668
+DEFAULT_WIN_ISO_SIZE   := 5550497792
+WIN_ISO_SRC    ?= $(CURDIR)/disk/Win10_22H2_EnterpriseEval_x64.iso
+WIN_ISO_OUT    ?= $(CURDIR)/disk/Win10_22H2_unattended.iso
+WIN_ISO_URL    ?= $(DEFAULT_WIN_ISO_URL)
+# Only pin size/checksum against the default object. A custom URL would fail them.
+ifeq ($(WIN_ISO_URL),$(DEFAULT_WIN_ISO_URL))
+WIN_ISO_SHA256 ?= $(DEFAULT_WIN_ISO_SHA256)
+WIN_ISO_SIZE   ?= $(DEFAULT_WIN_ISO_SIZE)
+else
+WIN_ISO_SHA256 ?=
+WIN_ISO_SIZE   ?=
+endif
 
 # Fork of hashicorp/packer-plugin-kubevirt. HTTPS so the clone needs no creds.
 PLUGIN_REPO ?= https://github.com/basil-eldho/packer-plugin-kubevirt.git
@@ -29,6 +53,12 @@ PLUGIN_DIR  ?= $(CURDIR)/packer-plugin-kubevirt
 # the upstream name is what makes those templates resolve to it.
 PLUGIN_SOURCE := github.com/hashicorp/kubevirt
 
+# 7z unpacks the Microsoft UDF tree without sudo and xorriso rebuilds the ISO.
+# Checked here rather than in preflight so an Ubuntu-only run is not blocked on
+# Windows tools.
+CORE_TOOLS := docker kind kubectl packer virtctl git go
+WIN_TOOLS  := xorriso curl 7z
+
 # Progress lines. Keep messages free of '%' — these are printf formats.
 SAY  := @printf '\033[0;32m▸ %s\033[0m\n'
 WARN := @printf '\033[1;33m! %s\033[0m\n'
@@ -36,28 +66,26 @@ WARN := @printf '\033[1;33m! %s\033[0m\n'
 NODE_IP = $$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 
 help: ## Show this help
-	@printf '\n  \033[1mKubeVirt Lab Platform\033[0m — warm-pool Ubuntu + Windows desktops\n'
+	@printf '\n  \033[1mKubeVirt VM lab\033[0m — Ubuntu and Windows desktops in a browser\n'
 	@awk 'BEGIN {FS = ":.*##"} \
 		/^##@/ { printf "\n  \033[1m%s\033[0m\n", substr($$0, 5) } \
 		/^[a-zA-Z0-9_-]+:.*##/ { printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
-	@printf '\n  \033[1mFirst run, in order:\033[0m\n'
-	@printf '    make cluster          # kind + KubeVirt + CDI\n'
-	@printf '    make golden-ubuntu    # one-time, ~20 min\n'
-	@printf '    make deploy && make urls\n'
-	@printf '\n  \033[1mAdd Windows later:\033[0m  make golden-windows && make deploy MIN_POOL_WINDOWS=1\n\n'
+	@printf '\n  \033[1mFirst run:\033[0m\n'
+	@printf '    make cluster && make golden-ubuntu && make vm OS=ubuntu NAME=ubuntu1\n'
+	@printf '  \033[1mWindows:\033[0m   make golden-windows && make vm OS=windows NAME=win1\n\n'
 
 ##@ Setup
 
-preflight: ## Check that required tools are installed
-	@missing=; for t in docker kind kubectl packer virtctl xorriso git go rsync lsof; do \
+# Invoked by `cluster`. Not in `make help`.
+preflight:
+	@missing=; for t in $(CORE_TOOLS); do \
 		command -v $$t >/dev/null || missing="$$missing $$t"; done; \
 	if [ -n "$$missing" ]; then printf '\033[1;33m! missing:%s\033[0m\n' "$$missing"; exit 1; fi
-	$(SAY) "All required tools present"
 
-cluster: preflight ## Create the kind cluster with KubeVirt + CDI
+cluster: preflight ## kind + KubeVirt + CDI
 	./scripts/setup-cluster.sh
 
-##@ Golden images (Packer, one-time)
+##@ Golden images
 
 # Order-only prerequisite: cloned when absent, otherwise left untouched, so
 # building from a dirty local checkout keeps working.
@@ -65,7 +93,7 @@ $(PLUGIN_DIR):
 	$(SAY) "Cloning the Packer plugin fork — $(PLUGIN_REF)"
 	git clone --branch $(PLUGIN_REF) --single-branch $(PLUGIN_REPO) $(PLUGIN_DIR)
 
-packer-init-local: | $(PLUGIN_DIR) ## Build and install the Packer plugin fork
+packer-init-local: | $(PLUGIN_DIR)
 	$(MAKE) -C $(PLUGIN_DIR) build
 	packer plugins install --path $(PLUGIN_DIR)/packer-plugin-kubevirt "$(PLUGIN_SOURCE)"
 
@@ -79,22 +107,76 @@ golden-ubuntu: packer-init-local ## Build the Ubuntu golden image (~20 min)
 		ubuntu.pkr.hcl
 	$(SAY) "Ubuntu golden image ready — DataSource $(GOLDEN_UBUNTU)"
 
-# Autounattend.xml goes in both places: sources/ for the windowsPE pass, root
-# for setup. One shell so the trap survives every step; a private mktemp -d
-# rather than /mnt, which would clobber whatever is already mounted there.
-prepare-windows-iso: ## Inject Autounattend.xml into the Windows ISO
-	@if [ ! -f "$(WIN_ISO_SRC)" ]; then \
+# Internal guard, invoked by the Windows targets. Not in `make help`.
+preflight-windows:
+	@missing=; for t in $(WIN_TOOLS); do \
+		command -v $$t >/dev/null || missing="$$missing $$t"; done; \
+	if [ -n "$$missing" ]; then \
+		printf '\033[1;33m! missing:%s\033[0m\n' "$$missing"; \
+		printf '  Debian/Ubuntu: sudo apt-get install -y xorriso curl p7zip-full\n'; exit 1; fi
+
+# Download the installer media, cached in disk/. Deliberately no prerequisites:
+# once the file exists make treats it as up to date, so a rebuild never re-fetches
+# 5.5 GB and an ISO you supplied by hand is used as-is. Delete it to force a refetch.
+#
+# Resumable, and the partial download is kept under .part so an interrupted or
+# 403-ed transfer cannot leave a truncated file that later looks like valid media.
+# Signed URLs expire mid-download; -f turns that into a failure instead of an
+# error page appended to the ISO, and rerunning with a fresh URL resumes.
+$(WIN_ISO_SRC):
+	@if [ -z "$(WIN_ISO_URL)" ]; then \
 		printf '\033[1;33m! Windows ISO not found at %s\n' "$(WIN_ISO_SRC)"; \
-		printf '  Optional — Ubuntu-only needs nothing here. Drop a Windows 10 22H2\n'; \
-		printf '  x64 ISO in disk/, or pass WIN_ISO_SRC=/path/to.iso\033[0m\n'; \
+		printf '  Optional — Ubuntu-only needs nothing here. Drop a Windows 10 22H2 x64\n'; \
+		printf '  ISO in disk/ (or pass WIN_ISO_SRC=/path/to.iso), or restore the default\n'; \
+		printf '  Evaluation Center URL so make can fetch it:\n'; \
+		printf '    make golden-windows\033[0m\n'; \
 		exit 1; fi
+	$(SAY) "Downloading Windows 10 22H2 Enterprise Evaluation — ~5.5 GB, resumable, cached in disk/"
 	@set -e; \
-	mnt=$$(mktemp -d); ext=$$(mktemp -d); \
-	trap 'sudo umount "$$mnt" 2>/dev/null || true; rmdir "$$mnt" 2>/dev/null || true; rm -rf "$$ext"' EXIT; \
+	mkdir -p "$(dir $(WIN_ISO_SRC))"; \
+	touch "$(WIN_ISO_SRC).part"; \
+	curl -fL --retry 3 --retry-delay 5 --continue-at - \
+		-o "$(WIN_ISO_SRC).part" "$(WIN_ISO_URL)"; \
+	if [ -n "$(WIN_ISO_SIZE)" ]; then \
+		got=$$(stat -c%s "$(WIN_ISO_SRC).part"); \
+		if [ "$$got" != "$(WIN_ISO_SIZE)" ]; then \
+			printf '\033[1;33m! size mismatch: got %s, expected %s\033[0m\n' "$$got" "$(WIN_ISO_SIZE)"; \
+			exit 1; \
+		fi; \
+	fi; \
+	if [ -n "$(WIN_ISO_SHA256)" ]; then \
+		printf '\033[0;32m▸ %s\033[0m\n' "Verifying sha256"; \
+		echo "$(WIN_ISO_SHA256)  $(WIN_ISO_SRC).part" | sha256sum -c -; \
+	else \
+		printf '\033[1;33m! %s\033[0m\n' "No WIN_ISO_SHA256 given — download not verified"; \
+	fi; \
+	mv "$(WIN_ISO_SRC).part" "$(WIN_ISO_SRC)"
+	$(SAY) "Windows ISO ready: $(WIN_ISO_SRC)"
+
+# Pre-download only. `golden-windows` already does this; keep the target for
+# fetching the ISO without starting Packer. Not in `make help`.
+fetch-windows-iso: preflight-windows $(WIN_ISO_SRC)
+
+# A real file target rather than a phony one, so a second `make golden-windows` —
+# after a failed Packer build, say — does not unpack 6 GB again for nothing.
+# Rebuilt only when the source ISO or the answer file is newer.
+#
+# Microsoft's ISO is UDF with a stub ISO9660 tree (often just README.TXT). A loop
+# mount works because the kernel picks UDF, but that needs root. 7z reads UDF as
+# a regular file, so the repack does not need sudo.
+#
+# Autounattend.xml goes in both places: sources/ for the windowsPE pass, root for
+# setup. xorriso writes to .tmp and the result is moved into place, so an
+# interrupted run cannot leave a truncated ISO that looks newer than its source
+# and gets skipped.
+$(WIN_ISO_OUT): $(WIN_ISO_SRC) golden/windows/autounattend.xml
+	@set -e; \
+	ext=$$(mktemp -d); \
+	trap 'rm -rf "$$ext"; rm -f "$(WIN_ISO_OUT).tmp"' EXIT; \
 	printf '\033[0;32m▸ %s\033[0m\n' "Repacking Windows ISO with Autounattend.xml"; \
-	sudo mount -o loop,ro "$(WIN_ISO_SRC)" "$$mnt"; \
-	rsync -a "$$mnt"/ "$$ext"/; \
-	sudo umount "$$mnt"; \
+	vol=$$(xorriso -indev "$(WIN_ISO_SRC)" -toc 2>&1 | sed -n "s/^Volume id    : '//p" | tr -d "'"); \
+	vol=$${vol:-CCCOMA_X64FRE_EN-US_DV9}; \
+	7z x -y -bd -o"$$ext" "$(WIN_ISO_SRC)" >/dev/null; \
 	chmod -R u+w "$$ext"; \
 	cp golden/windows/autounattend.xml "$$ext"/Autounattend.xml; \
 	cp golden/windows/autounattend.xml "$$ext"/sources/Autounattend.xml; \
@@ -105,10 +187,13 @@ prepare-windows-iso: ## Inject Autounattend.xml into the Windows ISO
 		-b boot/etfsboot.com -no-emul-boot -boot-load-size 8 -boot-info-table \
 		-eltorito-alt-boot -eltorito-platform efi \
 		-b efi/microsoft/boot/efisys.bin -no-emul-boot \
-		-V "CCCOMA_X64FRE_EN-GB_DV9" \
-		-o "$(WIN_ISO_OUT)" \
-		"$$ext"
+		-V "$$vol" \
+		-o "$(WIN_ISO_OUT).tmp" \
+		"$$ext"; \
+	mv "$(WIN_ISO_OUT).tmp" "$(WIN_ISO_OUT)"
 	$(SAY) "Unattended ISO ready: $(WIN_ISO_OUT)"
+
+prepare-windows-iso: preflight-windows $(WIN_ISO_OUT)
 
 golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golden image (~45 min)
 	kubectl delete dv windows-iso --ignore-not-found
@@ -117,7 +202,7 @@ golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golde
 	kubectl apply -f golden/windows/iso-dv.yaml
 	kubectl wait --for=jsonpath='{.status.phase}'=UploadReady dv/windows-iso --timeout=5m
 	$(SAY) "Uploading the Windows ISO — takes a few minutes"
-	# Kill the forward by its own PID and let a failed upload fail the target.
+	@# Kill the forward by its own PID and let a failed upload fail the target.
 	@set -e; \
 	kubectl port-forward -n cdi svc/cdi-uploadproxy 18443:443 & \
 	pf=$$!; \
@@ -136,116 +221,59 @@ golden-windows: packer-init-local prepare-windows-iso ## Build the Windows golde
 		windows.pkr.hcl
 	$(SAY) "Windows golden image ready — DataSource $(GOLDEN_WINDOWS)"
 
-##@ Deploy
+##@ Run VMs
 
-# Listed in the order `deploy` runs them: guards first (they fail in seconds),
-# then the image build, then the cluster objects.
-check-namespace: ## Refuse a NAMESPACE the deploy manifests cannot honour
+# Internal guards for the targets below. Kept out of `make help`: nobody runs
+# them directly, and they would crowd out the commands that matter.
+check-namespace:
 	@if [ "$(NAMESPACE)" != "default" ]; then \
 		printf '\033[1;33m! NAMESPACE=%s unsupported: deploy/ hardcodes `namespace: default`,\n' '$(NAMESPACE)'; \
-		printf '  so the platform and the golden images would land in different places.\033[0m\n'; \
+		printf '  so the manifests and the golden images would land in different places.\033[0m\n'; \
 		exit 1; fi
 
-# Without the DataSource the controller still creates VMs; their clone just
-# never resolves and the pool sits at zero with nothing obvious in the logs.
-# Only enabled pools are checked, so Ubuntu-only needs no Windows image.
-check-golden: ## Verify the golden DataSources the enabled pools need
-	@rc=0; \
-	ready() { kubectl get datasource "$$1" -n $(NAMESPACE) \
-		-o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -qx True; }; \
-	if [ "$(MIN_POOL_UBUNTU)" -gt 0 ] 2>/dev/null && ! ready $(GOLDEN_UBUNTU); then \
-		printf '\033[1;33m! Ubuntu pool is %s but DataSource "%s" is missing or not ready\n  Run: make golden-ubuntu\033[0m\n' \
-			'$(MIN_POOL_UBUNTU)' '$(GOLDEN_UBUNTU)'; rc=1; \
-	fi; \
-	if [ "$(MIN_POOL_WINDOWS)" -gt 0 ] 2>/dev/null && ! ready $(GOLDEN_WINDOWS); then \
-		printf '\033[1;33m! Windows pool is %s but DataSource "%s" is missing or not ready\n  Run: make golden-windows\033[0m\n' \
-			'$(MIN_POOL_WINDOWS)' '$(GOLDEN_WINDOWS)'; rc=1; \
-	fi; \
-	exit $$rc
-
-build: ## Build the controller and API images
-	docker build --target controller -t pool-controller:v1 pool-go/
-	docker build --target api -t pool-api:v1 pool-go/
-
-load-kind: build ## Build, then load images into the kind node
-	kind load docker-image pool-controller:v1
-	kind load docker-image pool-api:v1
-	$(SAY) "Images loaded into kind"
-
-setup-rbac: ## Apply the controller ServiceAccount and RBAC
-	kubectl apply -f deploy/rbac.yaml
-
-deploy-guacamole: ## Deploy the Guacamole stack (MySQL, guacd, Guacamole)
+# Guacamole plus the nginx proxy in front of it. A prerequisite of `vm`, because
+# the desktop link is useless until both are up and forgetting this step yields a
+# connection error that explains nothing.
+#
+# Deliberately no `rollout restart`: this runs on every `make vm`, and bouncing
+# the proxy would drop the tunnel of any desktop already open in a browser. Edit
+# portal/nginx.conf and you have to restart the Deployment yourself.
+serve: check-namespace
 	kubectl apply -f deploy/guacamole.yaml
 	$(WARN) "Waiting for MySQL — the first start runs schema init"
 	kubectl wait --for=condition=Ready pod -l app=mysql --timeout=3m
 	kubectl wait --for=condition=Ready pod -l app=guacamole --timeout=2m
-
-# load-kind is a prerequisite because the manifests use imagePullPolicy: Never —
-# the images must be on the node already or the pods hit ErrImageNeverPull.
-deploy: check-namespace check-golden load-kind setup-rbac deploy-guacamole ## Deploy the controller, API, and portal
-	kubectl apply -f deploy/redis.yaml
-	kubectl wait --for=condition=Ready pod -l app=redis --timeout=60s
-	kubectl apply -f deploy/windows-pool-unattend.yaml
-	kubectl apply -f deploy/controller.yaml
-	# Set unconditionally: comparing against controller.yaml's defaults first
-	# would rot silently the moment either default is edited.
-	kubectl set env deployment/pool-controller \
-		MIN_POOL_UBUNTU=$(MIN_POOL_UBUNTU) MIN_POOL_WINDOWS=$(MIN_POOL_WINDOWS) \
-		DATASOURCE_UBUNTU=$(GOLDEN_UBUNTU) DATASOURCE_WINDOWS=$(GOLDEN_WINDOWS)
-	kubectl apply -f deploy/api.yaml
-	kubectl create configmap portal-html --from-file=index.html=portal/index.html \
-		--dry-run=client -o yaml | kubectl apply -f -
 	kubectl create configmap portal-nginx-conf --from-file=nginx.conf=portal/nginx.conf \
 		--dry-run=client -o yaml | kubectl apply -f -
-	kubectl apply -f deploy/portal.yaml
-	$(SAY) "Deployed (ubuntu=$(MIN_POOL_UBUNTU), windows=$(MIN_POOL_WINDOWS)). Warm in 3-8 min: make status"
+	# Drop the pre-rename Service so NodePort 30000 is free for guac-proxy.
+	kubectl delete deployment,svc student-portal --ignore-not-found
+	kubectl apply -f deploy/guac-proxy.yaml
+	kubectl wait --for=condition=Ready pod -l app=guac-proxy --timeout=2m
 
-##@ Operate
+# Anything other than ubuntu or windows would otherwise fail later and less
+# clearly, on a `deploy/vm-$(OS).yaml` that does not exist.
+check-os:
+	@case "$(OS)" in ubuntu|windows) ;; *) \
+		printf '\033[1;33m! OS must be ubuntu or windows (got "%s")\033[0m\n' '$(OS)'; \
+		exit 1;; esac
 
-status: ## Show pool depth and active sessions
-	@printf '\n\033[1mPool VMs\033[0m\n'
-	@kubectl get vm -l managed-by=pool-controller \
-		-o custom-columns='NAME:.metadata.name,TYPE:.metadata.labels.pool-type,STATE:.metadata.labels.pool,VMI:.status.printableStatus' \
-		2>/dev/null || echo "  none"
-	@printf '\n\033[1mAPI\033[0m\n'
-	@curl -s "http://$(NODE_IP):30001/status" 2>/dev/null | python3 -m json.tool 2>/dev/null \
-		|| echo "  not reachable yet"
+# Checked before `serve` runs, so a missing image fails in a second rather than
+# after a three-minute wait on MySQL. The PVC is what the ephemeral volume mounts,
+# so that — not the DataSource — is what has to exist.
+check-golden: check-os
+	@kubectl get pvc $(GOLDEN) -n $(NAMESPACE) >/dev/null 2>&1 || { \
+		printf '\033[1;33m! golden image "%s" missing — run: make golden-$(OS)\033[0m\n' '$(GOLDEN)'; \
+		exit 1; }
 
-urls: ## Print the portal and API URLs
-	@ip=$(NODE_IP); \
-	printf '\n  Student portal  http://%s:30000\n'   "$$ip"; \
-	printf '  API status      http://%s:30001/status\n' "$$ip"; \
-	printf '  Guacamole admin http://%s:30000/guacamole/\n\n' "$$ip"
-
-logs: ## Tail the pool controller logs
-	kubectl logs -f deployment/pool-controller
-
-##@ Standalone VMs (no pool controller or API)
-
-# Guacamole plus the portal's nginx — that proxy carries the WebSocket upgrade
-# the token URL depends on. The controller, provisioning API and Redis are not
-# involved. Safe to run alongside the full platform: these VMs are labelled
-# app=lab-vm, so the pool controller ignores them and `make clean` spares them.
-vm-serve: deploy-guacamole ## Deploy only what browser access needs (Guacamole + portal)
-	kubectl create configmap portal-html --from-file=index.html=portal/index.html \
-		--dry-run=client -o yaml | kubectl apply -f -
-	kubectl create configmap portal-nginx-conf --from-file=nginx.conf=portal/nginx.conf \
-		--dry-run=client -o yaml | kubectl apply -f -
-	kubectl apply -f deploy/portal.yaml
-	kubectl wait --for=condition=Ready pod -l app=student-portal --timeout=2m
-
-vm: ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
-	@case "$(OS)" in ubuntu) ds=$(GOLDEN_UBUNTU);; windows) ds=$(GOLDEN_WINDOWS);; \
-		*) printf '\033[1;33m! OS must be ubuntu or windows\033[0m\n'; exit 1;; esac; \
-	kubectl get datasource $$ds -n $(NAMESPACE) >/dev/null 2>&1 || { \
-		printf '\033[1;33m! DataSource "%s" missing — run: make golden-$(OS)\033[0m\n' "$$ds"; exit 1; }; \
-	if [ "$(OS)" = windows ]; then kubectl apply -f deploy/windows-pool-unattend.yaml; fi; \
-	sed -e 's/__NAME__/$(NAME)/g' -e "s/__DATASOURCE__/$$ds/g" deploy/vm-$(OS).yaml | kubectl apply -f -
-	$(SAY) "Cloning the golden disk — a few minutes"
-	# Wait on the VM, not the VMI: the VMI does not exist until the clone
-	# finishes, and kubectl wait errors on a missing object. vm-connect.sh then
-	# waits for the desktop itself to answer.
+# The wait is on the VM, not the VMI: the VMI does not exist the instant the VM is
+# applied, and `kubectl wait` errors out on an object that is not there yet.
+# Readiness means the guest agent has checked in; vm-connect.sh then waits for the
+# desktop itself to answer. Comments stay out of the recipe so make does not echo
+# them into the middle of the output.
+vm: check-golden serve ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
+	@if [ "$(OS)" = windows ]; then kubectl apply -f deploy/windows-pool-unattend.yaml; fi
+	sed -e 's/__NAME__/$(NAME)/g' -e 's/__GOLDEN__/$(GOLDEN)/g' deploy/vm-$(OS).yaml | kubectl apply -f -
+	$(SAY) "Booting — the disk is an overlay on the golden image, so there is nothing to copy"
 	kubectl wait --for=condition=Ready vm/$(NAME) -n $(NAMESPACE) --timeout=15m
 	$(SAY) "Waiting for the desktop to come up"
 	@./scripts/vm-connect.sh $(NAME) $(OS)
@@ -253,26 +281,41 @@ vm: ## Spin up a VM and print a browser link (OS=ubuntu|windows NAME=lab1)
 vm-url: ## Reprint a VM's browser link with a fresh token (NAME=lab1 OS=ubuntu)
 	@./scripts/vm-connect.sh $(NAME) $(OS)
 
-vm-delete: ## Delete a standalone VM, its disk and its Service (NAME=lab1)
+# No disk to delete: the overlay lives in the virt-launcher pod and goes with it.
+vm-delete: ## Delete one VM and its Service (NAME=lab1)
 	kubectl delete vm $(NAME) -n $(NAMESPACE) --ignore-not-found
-	kubectl delete dv $(NAME)-disk -n $(NAMESPACE) --ignore-not-found
 	kubectl delete svc desktop-$(NAME) -n $(NAMESPACE) --ignore-not-found
 	$(WARN) "Guacamole connection '$(NAME)' and user 'lab-vm-$(NAME)' left in place — remove them in the admin UI"
-	
+
+##@ Operate
+
+status: ## List VMs, golden images, and the Guacamole URL
+	@printf '\n\033[1mVMs\033[0m\n'
+	@kubectl get vm -l app=lab-vm -n $(NAMESPACE) \
+		-o custom-columns='NAME:.metadata.name,OS:.metadata.labels.lab-vm-os,STATE:.status.printableStatus' \
+		2>/dev/null || echo "  none"
+	@printf '\n\033[1mGolden images\033[0m\n'
+	@kubectl get datasource -n $(NAMESPACE) \
+		-o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status' \
+		2>/dev/null || echo "  none"
+	@ip=$(NODE_IP); \
+	printf '\n  Guacamole    http://%s:30000/guacamole/\n' "$$ip"; \
+	printf '  Desktop link make vm-url NAME=%s OS=%s\n\n' '$(NAME)' '$(OS)'
+
+console: ## Serial console into a VM (NAME=lab1)
+	virtctl console $(NAME) -n $(NAMESPACE)
+
 ##@ Cleanup
 
-clean: ## Remove the platform and pool VMs, keeping golden images
-	kubectl delete deployment pool-controller provisioning-api student-portal redis --ignore-not-found
-	kubectl delete svc provisioning-api student-portal redis --ignore-not-found
-	kubectl delete configmap portal-html portal-nginx-conf --ignore-not-found
-	@kubectl get vm -l managed-by=pool-controller -o name 2>/dev/null | xargs -r kubectl delete
-	@kubectl get svc -l managed-by=pool-controller -o name 2>/dev/null | xargs -r kubectl delete
+clean: ## Delete every VM, plus Guacamole and the proxy; keep golden images
+	@kubectl get vm -l app=lab-vm -n $(NAMESPACE) -o name 2>/dev/null | xargs -r kubectl delete -n $(NAMESPACE)
+	@kubectl get svc -l app=lab-vm -n $(NAMESPACE) -o name 2>/dev/null | xargs -r kubectl delete -n $(NAMESPACE)
+	kubectl delete deployment guac-proxy student-portal --ignore-not-found
+	kubectl delete svc guac-proxy student-portal --ignore-not-found
+	kubectl delete configmap portal-nginx-conf windows-pool-unattend --ignore-not-found
 	kubectl delete -f deploy/guacamole.yaml --ignore-not-found
 	kubectl delete pvc mysql-data --ignore-not-found
-	kubectl delete clusterrolebinding pool-controller --ignore-not-found
-	kubectl delete clusterrole pool-controller --ignore-not-found
-	kubectl delete sa pool-controller --ignore-not-found
-	$(SAY) "Platform removed"
+	$(SAY) "VMs and browser access removed — golden images kept"
 
 # Everything in $(NAMESPACE): golden images, installer ISOs, and whatever a
 # Packer build left behind.
@@ -299,6 +342,6 @@ clean-cluster: ## Delete the kind cluster outright (full reset)
 	kind delete cluster
 	$(SAY) "Cluster deleted — start again with: make cluster"
 
-.PHONY: help preflight cluster build load-kind packer-init-local golden-ubuntu \
-        prepare-windows-iso golden-windows setup-rbac check-namespace check-golden \
-        deploy-guacamole deploy status urls logs vm vm-url vm-delete vm-serve clean clean-all clean-cluster
+.PHONY: help preflight cluster packer-init-local golden-ubuntu preflight-windows \
+        fetch-windows-iso prepare-windows-iso golden-windows check-namespace check-os check-golden \
+        serve vm vm-url vm-delete status console clean clean-all clean-cluster

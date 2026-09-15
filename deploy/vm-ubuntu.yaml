@@ -1,8 +1,18 @@
-# Standalone Ubuntu VM cloned from the golden image — no pool controller, no API,
-# no Guacamole. `make vm OS=ubuntu` substitutes __NAME__ and __DATASOURCE__.
+# An Ubuntu desktop VM backed by the golden image built by `make golden-ubuntu`.
+# `make vm OS=ubuntu NAME=lab1` substitutes __NAME__ and __GOLDEN__ and applies the
+# result, so this file is a template and not directly applyable.
 #
-# Deliberately NOT labelled managed-by=pool-controller: that label would make the
-# pool controller count this VM toward MinSize and make `make clean` delete it.
+# rootdisk is an `ephemeral` volume: KubeVirt mounts the golden PVC read-only and
+# gives this VM its own copy-on-write overlay on node-local storage. Nothing is
+# copied, so the VM starts as fast as it can boot. The overlay is discarded when
+# the VMI goes away, so a stop/start returns a pristine desktop — a guest reboot
+# keeps it, `virtctl stop` does not.
+#
+# Everything the desktop needs — XFCE, autologin, x11vnc on :5900 — is already
+# inside that image; see golden/ubuntu/scripts/setup-desktop.sh.
+#
+# app=lab-vm is what `make status`, `make clean` and the desktop Service selector
+# match on. Keep it if you copy this file.
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -13,20 +23,6 @@ metadata:
     lab-vm-os: ubuntu
 spec:
   runStrategy: Always
-  dataVolumeTemplates:
-  - metadata:
-      name: __NAME__-disk
-    spec:
-      sourceRef:
-        kind: DataSource
-        name: __DATASOURCE__
-        namespace: default
-      storage:
-        accessModes: [ReadWriteOnce]
-        resources:
-          requests:
-            storage: 20Gi
-        storageClassName: standard
   template:
     metadata:
       labels:
@@ -63,8 +59,9 @@ spec:
         pod: {}
       volumes:
       - name: rootdisk
-        dataVolume:
-          name: __NAME__-disk
+        ephemeral:
+          persistentVolumeClaim:
+            claimName: __GOLDEN__
       - name: cloudinitdisk
         cloudInitNoCloud:
           userData: |

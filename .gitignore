@@ -1,6 +1,6 @@
 # ── Large binary assets (never commit) ────────────────────────────────────────
-# Windows installation media is ~5.8 GB per file and is not redistributable.
-# Obtain it from Microsoft directly; see README.md § Golden images.
+# Windows installation media is ~5.5 GB and is gitignored. The default is the
+# public Enterprise Evaluation ISO; see README.md § Golden images.
 disk/
 *.iso
 *.qcow2
@@ -19,14 +19,6 @@ dist/
 packer_cache/
 crash.log
 crash.*.log
-*.exe
-*.test
-*.out
-
-# ── Go ────────────────────────────────────────────────────────────────────────
-vendor/
-go.work
-go.work.sum
 
 # ── Packer ────────────────────────────────────────────────────────────────────
 *.pkrvars.hcl

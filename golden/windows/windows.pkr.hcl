@@ -97,7 +97,7 @@ source "kubevirt-iso" "windows" {
 build {
   sources = ["source.kubevirt-iso.windows"]
 
-  # Create student user and apply lab settings via Packer WinRM connection
+  # Create the desktop login account and apply lab settings via WinRM
   provisioner "powershell" {
     scripts = ["scripts/setup.ps1"]
   }

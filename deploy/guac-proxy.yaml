@@ -1,33 +1,34 @@
+# nginx reverse proxy that publishes Guacamole on NodePort 30000.
+#
+# Guacamole itself has no NodePort (see deploy/guacamole.yaml): the desktop link
+# carries a ?token= parameter, and that auto-login only works when the Guacamole
+# API and client are on the same origin. This proxy is that origin, and it also
+# adds the WebSocket upgrade headers the Guacamole tunnel requires.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: student-portal
+  name: guac-proxy
   namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: student-portal
+      app: guac-proxy
   template:
     metadata:
       labels:
-        app: student-portal
+        app: guac-proxy
     spec:
       containers:
-      - name: portal
+      - name: proxy
         image: nginx:alpine
         ports:
         - containerPort: 80
         volumeMounts:
-        - name: html
-          mountPath: /usr/share/nginx/html
         - name: nginx-conf
           mountPath: /etc/nginx/conf.d/default.conf
           subPath: nginx.conf
       volumes:
-      - name: html
-        configMap:
-          name: portal-html
       - name: nginx-conf
         configMap:
           name: portal-nginx-conf
@@ -35,12 +36,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: student-portal
+  name: guac-proxy
   namespace: default
 spec:
   type: NodePort
   selector:
-    app: student-portal
+    app: guac-proxy
   ports:
   - port: 80
     targetPort: 80

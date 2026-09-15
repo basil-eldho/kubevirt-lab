@@ -18,7 +18,7 @@ apt-get install -y \
     x11-utils \
     x11vnc
 
-# Nothing may ever put a password prompt in front of the student. No dedicated
+# Nothing may ever put a password prompt in front of the desktop. No dedicated
 # locker is installed, but xfce4-power-manager blanks the display on idle and
 # then calls /usr/bin/xflock4, which — finding no locker — falls back to
 # "dm-tool lock" and drops the LightDM greeter over the running session. The
@@ -28,8 +28,8 @@ apt-get install -y \
 # that a no-op is the single change that covers them all.
 cat > /usr/bin/xflock4 << 'EOF'
 #!/bin/sh
-# Locking is disabled on lab pool VMs: single-student throwaway desktops that
-# auto-login and are only ever reached through Guacamole. See setup-desktop.sh.
+# Locking is disabled on these lab VMs: throwaway desktops that auto-login and
+# are only ever reached through Guacamole. See setup-desktop.sh.
 exit 0
 EOF
 chmod 755 /usr/bin/xflock4
@@ -50,7 +50,7 @@ cat > /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml << 'EOF'
 </channel>
 EOF
 
-# Auto-login: student sees the desktop immediately on VNC connect — no login screen
+# Auto-login: the desktop is there as soon as VNC connects — no login screen
 cat > /etc/lightdm/lightdm.conf << 'EOF'
 [Seat:*]
 autologin-user=student
@@ -70,12 +70,12 @@ X-GNOME-Autostart-enabled=true
 EOF
 
 # x11vnc serves the auto-logged-in XFCE session on :5900 so guacd can reach it
-# over the VM's ClusterIP Service — the same shape as RDP on the Windows pool.
+# over the VM's ClusterIP Service — the same shape as RDP on the Windows image.
 #
 # The password is capped at 8 characters on purpose: standard VNC auth derives a
 # DES key from the first 8 bytes and silently ignores the rest, so a longer value
 # here would not match what Guacamole sends. Keep this in sync with
-# UBUNTU_VNC_PASS in deploy/api.yaml.
+# UBUNTU_VNC_PASS in scripts/vm-connect.sh.
 x11vnc -storepasswd 'Lab@2024' /etc/x11vnc.pass
 chmod 600 /etc/x11vnc.pass
 
@@ -140,7 +140,7 @@ mkdir -p /etc/systemd/system/multi-user.target.wants
 ln -sf /lib/systemd/system/qemu-guest-agent.service \
     /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
 
-# Prevent background updates from running during a student session
+# Prevent background updates from running during a desktop session
 systemctl disable apt-daily.timer          2>/dev/null || true
 systemctl disable apt-daily-upgrade.timer  2>/dev/null || true
 systemctl disable apt-daily.service        2>/dev/null || true
