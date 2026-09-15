@@ -7,9 +7,9 @@
 # `make vm` runs this at the end, so it is rarely called directly — reach for it
 # when a token has expired and you want a fresh link.
 #
-# Idempotent, but it needs Guacamole and the nginx proxy running (`make serve`,
-# which `make vm` depends on). The URL only works through that proxy, which adds
-# the WebSocket upgrade headers Guacamole's tunnel requires.
+# Idempotent, but it needs Guacamole and the nginx proxy running (`make vm`
+# deploys them). The URL only works through that proxy, which adds the
+# WebSocket upgrade headers Guacamole's tunnel requires.
 
 set -euo pipefail
 
@@ -64,17 +64,38 @@ HOSTNAME="${SVC}.${NAMESPACE}.svc.cluster.local"
 # ── 2. Wait until the desktop actually answers ────────────────────────────────
 # The OS booting is not enough: x11vnc reattaches after the autologin X restart,
 # and guacd gives up after ~5s of nothing listening, leaving a black canvas.
-#
-# Note this proves a listener, not a desktop. On an image built before x11vnc
-# was gated on a live session (see golden/ubuntu/scripts/setup-desktop.sh),
-# x11vnc binds 5900 whether or not LightDM ever logged anyone in, so this check
-# passes and the URL below opens on a black root window. If that happens,
-# `virtctl console` in and check `loginctl list-sessions`.
+# Step 2a below gates on a real session; this only waits for the Service to have
+# an endpoint to route to.
 for i in $(seq 60); do
   [ -n "$(kubectl get endpoints "$SVC" -n "$NAMESPACE" \
       -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ] && break
   sleep 2
 done
+
+# ── 2a. Wait for a desktop session, not just a listening port ─────────────────
+# Windows binds 3389 early in boot, long before the shell is up, so the TCP probe
+# below can pass while guacd still times out on the RDP handshake — a link that
+# opens on a timeout or a black canvas. The guest agent's userlist reports the
+# autologin session both golden images create, which is the signal that there is
+# actually a desktop to serve.
+#
+# Best-effort: an image whose guest agent never reports users would otherwise
+# block here forever, so a timeout warns and falls through to the TCP probe.
+USERLIST="/apis/subresources.kubevirt.io/v1/namespaces/${NAMESPACE}/virtualmachineinstances/${NAME}/userlist"
+SESSION=no
+for i in $(seq 150); do
+  USERS=$(kubectl get --raw "$USERLIST" 2>/dev/null |
+    python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("items") or []))' \
+    2>/dev/null || echo 0)
+  if [ "${USERS:-0}" -gt 0 ] 2>/dev/null; then SESSION=yes; break; fi
+  sleep 2
+done
+
+if [ "$SESSION" != yes ]; then
+  printf '\033[1;33m! %s: no logged-in session reported after 5 min — the desktop may\n' \
+    "$NAME" >&2
+  printf '  still be booting, and the link below can open on a black screen.\033[0m\n' >&2
+fi
 
 kubectl port-forward -n "$NAMESPACE" "svc/${SVC}" ":${PORT}" >/tmp/pf-$$.log 2>&1 &
 PF_PID=$!

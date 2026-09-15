@@ -1,145 +1,100 @@
 # Ubuntu and Windows desktops on KubeVirt
 
-**A working, end-to-end proof of concept: build golden Ubuntu 24.04 and Windows 10 images with
-Packer, run them as KubeVirt VMs on a single-node kind cluster, and open either desktop in your
-browser — no VNC or RDP client installed.**
-
-Three commands for Ubuntu:
+**An end-to-end proof of concept: build golden Ubuntu 24.04 and Windows 10 images with Packer, run
+them as KubeVirt VMs on a single-node kind cluster, and open either desktop in a browser — no VNC or
+RDP client needed.**
 
 ```bash
-make cluster                        # kind + KubeVirt + CDI          (~10 min)
-make golden-ubuntu                  # one-time Packer build          (~20 min)
-make vm OS=ubuntu NAME=ubuntu1      # clone, boot, print a link      (~3 min)
+make cluster                        # kind + KubeVirt + CDI     (~10 min)
+make golden-ubuntu                  # one-time Packer build     (~20 min)
+make vm OS=ubuntu NAME=ubuntu1      # boot and print a link     (~1 min)
 ```
 
-Then two more for Windows, once you supply an ISO:
+Windows is the same two steps; the installer ISO is downloaded for you:
 
 ```bash
-make golden-windows                 # one-time Packer build          (~45 min)
+make golden-windows                 # fetch ISO + Packer build  (~45 min)
 make vm OS=windows NAME=win1
 ```
 
 Each `make vm` prints a URL. Open it and the desktop is there, already logged in.
 
----
-
-## Why this exists
-
-KubeVirt's own documentation covers the primitives well: `VirtualMachine`, CDI `DataVolume`,
-`virtctl`. What was missing when I built this was the whole path — how to get from an installer ISO
-to a *reusable golden image*, and from there to a running desktop you can actually look at, for
-Windows as well as Linux. The Windows half in particular is mostly folklore: unattended installs on
-KubeVirt fail in several non-obvious ways, and the fixes are buried in issue threads.
-
-So this repository is the missing middle. Everything here runs on one machine, and the parts that
-took the longest to get right are documented as such rather than left as bare YAML.
-
-**What it is not:** production infrastructure. Credentials are committed on purpose so the lab
-reproduces, nothing is authenticated, and there is no TLS. Keep it on an isolated network. See
-[Security and known gaps](#security-and-known-gaps).
+**What this is not:** production infrastructure. Credentials are committed on purpose so the lab
+reproduces, nothing is authenticated, and there is no TLS. Keep it on a network you control.
 
 ---
 
 ## Prerequisites
 
 **Hardware virtualization is mandatory.** KubeVirt runs real QEMU/KVM VMs, so the host needs
-`/dev/kvm`. This is the single most common reason a KubeVirt POC fails on the first attempt — on a
-cloud VM you must explicitly enable nested virtualization before any of this works.
+`/dev/kvm` — on a cloud VM, nested virtualization has to be enabled first. This is the most common
+reason a first attempt fails.
 
 ```bash
-ls -l /dev/kvm            # must exist and be readable
-kvm-ok                    # Debian/Ubuntu: cpu-checker package
+ls -l /dev/kvm     # must exist and be readable
 ```
 
-If you have no KVM, you can fall back to software emulation. Ubuntu becomes sluggish and Windows
-becomes unusable, but the pipeline runs:
+Without KVM you can fall back to emulation. Ubuntu becomes sluggish, Windows unusable:
 
 ```bash
 kubectl -n kubevirt patch kv kubevirt --type merge \
   -p '{"spec":{"configuration":{"developerConfiguration":{"useEmulation":true}}}}'
 ```
 
-**Tools:** `docker`, `kind`, `kubectl`, `packer`, `virtctl`, `git`, `go`. Run `make preflight` to
-check. Adding Windows also needs `xorriso` and `rsync` (`make preflight-windows`) and `sudo`, to
-mount and repack the installer ISO.
+**Tools:** `docker`, `kind`, `kubectl`, `packer`, `virtctl`, `git`, `go` — checked by `make cluster`.
+Windows additionally needs `xorriso`, `p7zip-full` (`7z`), and `curl` to fetch and repack the installer ISO.
 
-**Capacity:** roughly **8 GB RAM and 60 GB disk** for Ubuntu alone — the VM requests 2 GB and the
-Guacamole stack plus the KubeVirt and CDI control planes want a few more. Add Windows and it is
-**16 GB RAM and ~200 GB disk**: the VM requests 4 GB, and between the source ISO, the repacked ISO,
-the 64 GiB golden image and each clone, storage adds up fast.
-
-**A Windows 10 ISO**, if you want the Windows VM. It is not redistributable and is not in this
-repository — download a Windows 10 22H2 x64 image from Microsoft and drop it in `disk/`, which is
-gitignored. See [Golden images](#golden-images).
+**Capacity:** ~8 GB RAM and 60 GB disk for Ubuntu alone. With Windows, ~16 GB RAM and ~120 GB disk —
+the 5.5 GB source ISO, the repacked copy and a 64 GiB golden image dominate. VMs themselves are cheap:
+each one is a copy-on-write overlay on the golden image, not a copy of it.
 
 ---
 
-## Walkthrough
+## The workflow
 
-### 1. The cluster
+See the [detailed flow diagrams](docs/workflow.md) for cluster setup, golden-image
+builds, Windows provisioning, VM creation, and browser traffic.
 
-```bash
-make cluster
-```
+### 1. Cluster
 
-`scripts/setup-cluster.sh` creates a kind cluster, then installs **KubeVirt v1.8.2** and **CDI
-v1.65.0** and waits for both to report Available. Idempotent — re-run it freely. CDI is the piece
-that turns an ISO or a disk image into a PVC, and later clones the golden PVC per VM.
+`make cluster` runs [scripts/setup-cluster.sh](scripts/setup-cluster.sh): a kind cluster
+(`kindest/node:v1.35.0`), then **KubeVirt v1.8.2** and **CDI v1.65.0**, waiting for both to report
+Available. Idempotent — re-run it freely. CDI is what turns an installer ISO into a golden PVC;
+VMs then overlay that PVC directly, so CDI is not in the path of `make vm` at all.
 
-### 2. A golden image
+### 2. Golden image
 
-```bash
-make golden-ubuntu
-```
+`make golden-ubuntu` is the slow, once-per-cluster step. Packer boots a throwaway VM *inside the
+cluster* from the Ubuntu 24.04 ISO, runs an unattended install driven by
+[golden/ubuntu/user-data](golden/ubuntu/user-data), provisions XFCE with autologin and **x11vnc on
+:5900 inside the guest**, generalizes the disk, and leaves a CDI `DataSource` named `ubuntu-golden`.
 
-This is the slow, once-per-cluster step, and the most interesting one. Packer boots a throwaway VM
-*inside the cluster* from the Ubuntu 24.04 ISO, runs an unattended install driven by
-`golden/ubuntu/user-data`, then provisions the desktop with
-`golden/ubuntu/scripts/setup-desktop.sh` — XFCE, autologin, and **x11vnc listening on :5900 inside
-the guest**. Finally it generalizes the disk and leaves behind a CDI `DataSource` named
-`ubuntu-golden`.
+Putting the VNC server *in the guest* rather than proxying `virtctl vnc` from outside is the
+decision the rest of the repo rests on: an Ubuntu desktop and a Windows desktop then look identical
+to the cluster — both are just a TCP port behind a Service.
 
-Putting the VNC server *in the guest* rather than proxying `virtctl vnc` from outside is the design
-decision the rest of the repo rests on: it makes an Ubuntu desktop and a Windows desktop look
-identical from the cluster's point of view. Both are just a TCP port behind a Service.
+`make golden-windows` has the same shape, plus media handling (see [Windows](#windows)).
 
-### 3. A VM
+### 3. VM
 
-```bash
-make vm OS=ubuntu NAME=ubuntu1
-```
+`make vm OS=ubuntu NAME=ubuntu1`, in order:
 
-In order, this:
+1. checks the `ubuntu-golden` PVC exists, so a missing image fails in a second;
+2. deploys Guacamole, guacd, MySQL and the nginx proxy if they are not already up;
+3. renders [deploy/vm-ubuntu.yaml](deploy/vm-ubuntu.yaml) and applies it — the VM's root disk is an
+   `ephemeral` volume, so KubeVirt mounts the golden PVC read-only and lays a copy-on-write overlay
+   over it. Nothing is copied, and boot is the only thing left to wait for;
+4. waits for the VM to be Ready, meaning the QEMU guest agent has checked in;
+5. runs [scripts/vm-connect.sh](scripts/vm-connect.sh), which creates a ClusterIP Service for the
+   guest's VNC or RDP port, waits until it answers, registers the connection in Guacamole, and
+   prints an auto-login URL.
 
-1. checks that the `ubuntu-golden` DataSource exists, so a missing image fails in a second;
-2. deploys Guacamole, guacd, MySQL and the nginx proxy if they are not already up (`make serve`);
-3. renders `deploy/vm-ubuntu.yaml` with the name and DataSource, and applies it — CDI
-   copy-on-write clones the golden PVC, which is why this takes minutes and not the 20 that a fresh
-   install would;
-4. waits for the VM to report Ready, which for both OS types means the QEMU guest agent has checked
-   in;
-5. runs `scripts/vm-connect.sh`, which creates a ClusterIP Service pointing at the guest's VNC or
-   RDP port, waits until something actually answers on it, registers the connection in Guacamole,
-   and prints an auto-login URL.
+Re-run with a different `NAME` for another VM. `make status` lists what exists.
 
-Run it again with a different `NAME` for a second VM. `make status` lists what you have.
+### Browser access
 
-### 4. Windows
-
-```bash
-make golden-windows
-make vm OS=windows NAME=win1
-```
-
-Same shape, different guest: RDP on :3389 instead of VNC on :5900, a sysprep answer file instead of
-cloud-init, and a longer build. `make vm` handles the difference.
-
----
-
-## How the browser access works
-
-Both OS types reach the browser through **Apache Guacamole**, over one code path. The only per-OS
-difference is a protocol and a port number.
+Both OS types reach the browser over one code path; the only per-OS difference is a protocol and a
+port.
 
 ```
 Your browser
@@ -154,16 +109,9 @@ Apache Guacamole ──► guacd ──┬── vnc :5900 ──►  Ubuntu VM 
                               per-VM ClusterIP Service, selector kubevirt.io/vm=<name>
 ```
 
-The link `vm-connect.sh` prints carries a Guacamole token for a **throwaway account scoped to that
-one VM**, recreated on every run. That matters: handing out the `guacadmin` token instead would let
-anyone holding the link enumerate every other connection and read its hostname and password back in
-plaintext.
-
-An earlier revision of this repo put a Go control plane in front of all this — a controller keeping
-a warm pool of pre-booted VMs and an HTTP API that handed them out, so a click produced a desktop in
-under two seconds. It worked, but it is a distraction from the KubeVirt mechanics this repo is meant
-to show. It is preserved on the
-[`warm-pool`](https://github.com/basil-eldho/kubevirt-lab/tree/warm-pool) branch.
+The printed link carries a token for a **throwaway account scoped to that one VM**, recreated on
+every run — the `guacadmin` token would instead let anyone holding the link enumerate every other
+connection and read its password back in plaintext.
 
 ---
 
@@ -177,65 +125,56 @@ to show. It is preserved on the
 | `make golden-ubuntu` / `make golden-windows` | Build a golden image (one-time, slow) |
 | `make vm OS=ubuntu NAME=ubuntu1` | Create a VM and print a browser link |
 | `make vm-url NAME=ubuntu1 OS=ubuntu` | Fresh link — tokens expire after 60 idle minutes |
-| `make status` | Which VMs and golden images exist |
-| `make urls` | The Guacamole URL and admin login |
+| `make status` | VMs, golden images, and the Guacamole URL |
 | `make console NAME=ubuntu1` | Serial console into the guest, for debugging |
-| `make vm-delete NAME=ubuntu1` | Delete one VM, its disk and its Service |
+| `make vm-delete NAME=ubuntu1` | Delete one VM and its Service |
 | `make clean` | Delete all VMs and Guacamole; keep the golden images |
-| `make clean-all` | Also delete the golden images and every PVC |
+| `make clean-all` | Also delete golden images, ISOs and every PVC |
 | `make clean-cluster` | Delete the kind cluster outright |
 
 ---
 
-## Golden images
+## Windows
 
-Ubuntu builds unattended from the public 24.04 ISO with no manual steps.
+`make golden-windows` downloads the public **Windows 10 22H2 Enterprise Evaluation** ISO (~5.5 GB,
+resumable, size- and SHA256-verified), caches it in `disk/`, injects `Autounattend.xml` and repacks
+it. To use your own media instead, drop it at `disk/Win10_22H2_EnterpriseEval_x64.iso` or pass
+`WIN_ISO_SRC=/path/to.iso`; a different URL goes in `WIN_ISO_URL` (as an env var — make would expand
+`&` and `$` in a signed URL). Custom media unsets the checksum pins, and
+[golden/windows/autounattend.xml](golden/windows/autounattend.xml) targets the Evaluation WIM, so a
+retail ISO needs its image name and product key adjusted.
 
-Windows needs media you supply. Place a Windows 10 22H2 x64 ISO at
-`disk/Win10_22H2_EnglishInternational_x64v1.iso`, then `make golden-windows` runs
-`prepare-windows-iso` for you: it mounts the ISO, injects `Autounattend.xml`, and repacks it with a
-no-prompt EFI boot image.
+A **fully unattended Windows install on KubeVirt** took a long series of failed approaches — oemdrv
+disks, cloud-init, floppy attachment — before ISO injection worked. The combination that does work:
 
-Getting a **fully unattended Windows install onto KubeVirt** took a long series of failed
-approaches — oemdrv disks, cloud-init, floppy attachment — before ISO injection worked. If you are
-fighting the same problem, the working combination is:
-
-- `Autounattend.xml` in **both** the ISO root and `sources/` — the root copy for setup, the
-  `sources/` copy for the windowsPE pass;
+- `Autounattend.xml` in **both** the ISO root and `sources/` — root for setup, `sources/` for the
+  windowsPE pass;
 - an `efisys.bin` no-prompt EFI boot image, so the build does not stall on "press any key to boot";
 - a Packer `boot_command` of `["<enter>"]`;
-- `virtio-win` drivers installed during the build, and the QEMU guest agent, or KubeVirt never sees
+- `virtio-win` drivers and the QEMU guest agent installed during the build, or KubeVirt never sees
   the guest come up;
-- a sysprep answer file mounted on every clone (`deploy/windows-pool-unattend.yaml`). The golden
-  image is sysprepped with `/oobe`, so without it a clone stops at the region-select wizard.
+- a sysprep answer file mounted on every VM
+  ([deploy/windows-pool-unattend.yaml](deploy/windows-pool-unattend.yaml)). The golden image is
+  sysprepped with `/oobe`, so without it the VM stops at the region-select wizard. Because every
+  start overlays the pristine image, this runs on every boot, not just the first.
 
-### Upgrading or recreating an image
+---
 
-The Packer build creates the `ubuntu-golden` / `windows-golden` CDI `DataSource` itself, so there is
-nothing to apply by hand. Re-running `make golden-ubuntu` replaces both the DataVolume and the
-DataSource; VMs created afterwards clone the new image, while existing VMs keep the disk they already
-cloned. On a cluster backed by Ceph or another CSI with snapshot support, pointing the DataSource at
-a `snapshot` source rather than a `pvc` makes every clone instant — nothing else has to change.
+## Packer plugin fork
 
-### Packer plugin fork
-
-Upstream `hashicorp/packer-plugin-kubevirt` is missing a few things this pipeline needs, so the
-golden targets use a [fork](https://github.com/basil-eldho/packer-plugin-kubevirt) and clone it on
-demand — no manual step. `make packer-init-local` builds and installs it.
-
-It installs under the name `github.com/hashicorp/kubevirt`, which is what the `required_plugins`
-blocks in `golden/*/*.pkr.hcl` resolve against. That name is deliberate, not a mistake. The fork
-carries three changes:
+Upstream `hashicorp/packer-plugin-kubevirt` lacks a few things this pipeline needs, so the golden
+targets clone a [fork](https://github.com/basil-eldho/packer-plugin-kubevirt) on demand and install
+it under the *upstream* name `github.com/hashicorp/kubevirt` — deliberate, since that is what the
+`required_plugins` blocks in `golden/*/*.pkr.hcl` resolve against.
 
 | Change | Why |
 |---|---|
 | `media_files_label` config field | Ubuntu cloud-init looks for a `cidata`-labelled disk, not the builder's hardcoded `OEMDRV` |
-| UEFI firmware on the build VM | The VMs here boot UEFI; if the install VM does not match, Ubuntu installs a BIOS bootloader that never boots |
-| Pre-existing resource cleanup | A failed run leaves an orphaned DataVolume/DataSource that blocks the next run until deleted by hand |
+| UEFI firmware on the build VM | These VMs boot UEFI; a BIOS build VM produces a bootloader that never boots |
+| Pre-existing resource cleanup | A failed run leaves an orphaned DataVolume/DataSource that blocks the next run |
 
-If `packer-plugin-kubevirt/` already exists it is left untouched — nothing pulls or resets it — so
-building from a dirty working tree is supported. Point it elsewhere with `PLUGIN_REPO`,
-`PLUGIN_REF`, or `PLUGIN_DIR`.
+An existing `packer-plugin-kubevirt/` checkout is left untouched, so building from a dirty tree
+works. Override with `PLUGIN_REPO`, `PLUGIN_REF` or `PLUGIN_DIR`.
 
 ---
 
@@ -244,66 +183,61 @@ building from a dirty working tree is supported. Point it elsewhere with `PLUGIN
 | Path | What it is |
 |---|---|
 | [golden/](golden/) | Packer templates and provisioning scripts for the Ubuntu and Windows images |
-| [deploy/](deploy/) | The VM templates, the Guacamole stack, the nginx proxy, the sysprep ConfigMap |
+| [deploy/](deploy/) | VM templates, the Guacamole stack, the nginx proxy, the sysprep ConfigMap |
 | [scripts/](scripts/) | Cluster bootstrap, and `vm-connect.sh` which publishes a desktop and prints a link |
 | [Makefile](Makefile) | Every command above |
+
+An earlier revision put a Go control plane in front of all this — a controller keeping a warm pool of
+pre-booted VMs behind an HTTP API, so a click produced a desktop in under two seconds. It worked, but
+it distracts from the KubeVirt mechanics this repo exists to show; it is preserved on the
+[`warm-pool`](https://github.com/basil-eldho/kubevirt-lab/tree/warm-pool) branch.
 
 ---
 
 ## Troubleshooting
 
-**The link opens on a black screen.** The desktop is not rendering yet, or x11vnc attached before
-anything logged in. `make console NAME=ubuntu1` in and check `loginctl list-sessions`; re-running
-`make vm-url` reissues the connection with a fresh hostname and password.
+**Black screen.** The desktop is not rendering yet, or x11vnc attached before anything logged in.
+`make console NAME=ubuntu1` and check `loginctl list-sessions`; `make vm-url` reissues the connection.
 
-**The URL's host is unreachable.** `make urls` prints the kind node's internal IP, which is directly
-routable on Linux but **not** from the host on Docker Desktop for macOS or Windows. Port-forward
-instead, then open `http://localhost:8080/guacamole/` and paste the `#/client/...?token=...`
-fragment from the printed link onto it:
+**The URL's host is unreachable.** `make status` prints the kind node's internal IP, routable on
+Linux but **not** from the host on Docker Desktop. Port-forward instead, then paste the
+`#/client/...?token=...` fragment onto `http://localhost:8080/guacamole/`:
 
 ```bash
-kubectl port-forward svc/student-portal 8080:80
+kubectl port-forward svc/guac-proxy 8080:80
 ```
 
-**A VM sits in `WaitingForVolumeBinding` or never becomes Ready.** The clone is still running, or
-there is no disk space left. Check `kubectl get dv` and the CDI importer pod's logs.
+**A VM never goes Ready.** Check `kubectl get vmi` and the virt-launcher pod. If VMIs sit at
+`phase=Scheduled` and never define a libvirt domain, virt-handler has wedged:
+`kubectl rollout restart ds/virt-handler -n kubevirt`.
 
-**Windows boots to a setup wizard.** The sysprep ConfigMap is missing. `make vm OS=windows` applies
+**Windows boots to a setup wizard.** The sysprep ConfigMap is missing — `make vm OS=windows` applies
 it; a hand-applied `deploy/vm-windows.yaml` does not.
 
-**A Packer build failed and the next one refuses to start.** An orphaned DataVolume or DataSource is
-in the way. `make clean-all` clears everything including the golden images, or delete the named
-DataVolume by hand to keep them.
+**Windows reboots into OOBE over and over.** Every VM start overlays the pristine sysprepped image,
+so a guest *shutdown* — as opposed to a reboot — makes `runStrategy: Always` build a fresh VMI with a
+fresh overlay, and OOBE runs again. Guest-internal reboots are safe; a full shutdown is not. If the
+unattend sequence ends in a shutdown, switch that VM to `runStrategy: Manual`.
+
+**A golden image rebuild hangs.** Running VMs mount the golden PVC read-only, so `make golden-*`
+cannot replace it underneath them. `make clean` first.
+
+**A Packer build failed and the next refuses to start.** An orphaned DataVolume or DataSource is in
+the way: `make clean-all`, or delete the named DataVolume to keep the golden images.
 
 **Everything is slow.** Check `/dev/kvm` and that you are not running under `useEmulation`.
 
 ---
 
-## Security and known gaps
+## Notes and feedback
 
-This is a proof of concept, and every item here is a known open gap rather than an undiscovered bug.
-Do not put it on a network you do not control.
-
-- **Credentials are committed deliberately** so the lab reproduces: `student` / `Lab@2024!` on
-  Windows, `Lab@2024` for Ubuntu's VNC (capped at 8 characters, because standard VNC auth derives a
-  DES key from the first 8 bytes and silently ignores the rest), `guacadmin` / `guacadmin` for the
-  Guacamole admin UI, and `guacamole_pass` / `rootpass` for MySQL. They are not secrets and are not
-  used anywhere real. Replace them with Kubernetes Secrets before any deployment you care about.
-- **No TLS.** The proxy serves plain HTTP and the Guacamole token travels in the URL.
-- **No NetworkPolicy**, and the desktop Services are reachable from anything else in the cluster.
-- **Shared desktop credentials with autologin**, so there is no OS-level isolation between whoever
-  holds two links.
-- **Guacamole state outlives its VM.** `make vm-delete` removes the VM, disk and Service, but leaves
-  the connection and its scoped user in the Guacamole database; `make clean` drops the whole MySQL
-  PVC.
-- **Single replica of everything**, no resource limits, containers run as root, and no automated
-  tests.
+I built this while learning KubeVirt, CDI and Packer, so parts of it are almost certainly done in a
+clumsier way than they need to be — there may well be better patterns for the golden-image flow, the
+per-VM Services, or the Guacamole wiring than the ones here. If you spot something wrong, fragile, or
+just unnecessary, please open an issue or a pull request. That kind of feedback is genuinely useful
+to me, and thanks in advance.
 
 ---
-
-## Contributing
-
-Issues and pull requests are welcome.
 
 ## License
 

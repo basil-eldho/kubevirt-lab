@@ -7,20 +7,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: student-portal
+  name: guac-proxy
   namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: student-portal
+      app: guac-proxy
   template:
     metadata:
       labels:
-        app: student-portal
+        app: guac-proxy
     spec:
       containers:
-      - name: portal
+      - name: proxy
         image: nginx:alpine
         ports:
         - containerPort: 80
@@ -36,12 +36,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: student-portal
+  name: guac-proxy
   namespace: default
 spec:
   type: NodePort
   selector:
-    app: student-portal
+    app: guac-proxy
   ports:
   - port: 80
     targetPort: 80

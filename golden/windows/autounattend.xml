@@ -2,6 +2,9 @@
 <!--
   Windows 10 unattended install for Packer kubevirt-iso builder.
 
+  Matches the default ISO: Windows 10 22H2 Enterprise Evaluation (en-US).
+  The Evaluation WIM has no Pro/Home images and does not need a product key.
+
   Disk layout:
     - E:\ = virtio-container-disk (VirtIO drivers + QEMU guest agent MSI)
     - F:\ = sysprep volume (this file + PS scripts, from the media_files ConfigMap)
@@ -21,13 +24,13 @@
                language="neutral"
                versionScope="nonSxS">
       <SetupUILanguage>
-        <UILanguage>en-GB</UILanguage>
+        <UILanguage>en-US</UILanguage>
       </SetupUILanguage>
-      <InputLocale>0809:00000809</InputLocale>
-      <SystemLocale>en-GB</SystemLocale>
-      <UILanguage>en-GB</UILanguage>
-      <UILanguageFallback>en-GB</UILanguageFallback>
-      <UserLocale>en-GB</UserLocale>
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UILanguageFallback>en-US</UILanguageFallback>
+      <UserLocale>en-US</UserLocale>
     </component>
 
     <!-- Load VirtIO storage driver from virtio-container-disk at E:\ -->
@@ -108,8 +111,8 @@
         <OSImage>
           <InstallFrom>
             <MetaData wcm:action="add">
-              <Key>/Image/Description</Key>
-              <Value>Windows 10 Pro</Value>
+              <Key>/IMAGE/NAME</Key>
+              <Value>Windows 10 Enterprise Evaluation</Value>
             </MetaData>
           </InstallFrom>
           <InstallTo>
@@ -119,12 +122,12 @@
         </OSImage>
       </ImageInstall>
 
+      <!-- Eval media is already licensed for 90 days. Do not send an empty
+           ProductKey: Setup then looks for license terms that are not on this
+           ISO and dies with "Windows cannot find Microsoft software license
+           terms." Omit the element so it uses the Evaluation image as-is. -->
       <UserData>
         <AcceptEula>true</AcceptEula>
-        <ProductKey>
-          <!-- KMS client setup key for Windows 10 Pro - generic, not a retail activation key -->
-          <Key>W269N-WFGWX-YVC9B-4J6C9-T83GX</Key>
-        </ProductKey>
       </UserData>
     </component>
   </settings>
@@ -136,11 +139,11 @@
                publicKeyToken="31bf3856ad364e35"
                language="neutral"
                versionScope="nonSxS">
-      <InputLocale>0809:00000809</InputLocale>
-      <SystemLocale>en-GB</SystemLocale>
-      <UILanguage>en-GB</UILanguage>
-      <UILanguageFallback>en-GB</UILanguageFallback>
-      <UserLocale>en-GB</UserLocale>
+      <InputLocale>0409:00000409</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UILanguageFallback>en-US</UILanguageFallback>
+      <UserLocale>en-US</UserLocale>
     </component>
     <component name="Microsoft-Windows-Security-SPP-UX"
                processorArchitecture="amd64"

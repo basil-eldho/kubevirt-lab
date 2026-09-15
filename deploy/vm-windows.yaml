@@ -1,11 +1,20 @@
-# A Windows desktop VM, cloned from the golden image built by `make golden-windows`.
-# `make vm OS=windows NAME=win1` substitutes __NAME__ and __DATASOURCE__ and applies
-# the result, so this file is a template and not directly applyable.
+# A Windows desktop VM backed by the golden image built by `make golden-windows`.
+# `make vm OS=windows NAME=win1` substitutes __NAME__ and __GOLDEN__ and applies the
+# result, so this file is a template and not directly applyable.
+#
+# rootdisk is an `ephemeral` volume: KubeVirt mounts the golden PVC read-only and
+# gives this VM its own copy-on-write overlay on node-local storage. Nothing is
+# copied, so the VM starts as fast as it can boot. The overlay is discarded when
+# the VMI goes away, so a stop/start returns a pristine desktop — a guest reboot
+# keeps it, `virtctl stop` does not.
+#
+# Because every start re-runs OOBE against the pristine image, the sysprep answer
+# file below is now required on every boot, not just the first.
 #
 # Two parts of this are load-bearing and easy to drop when adapting it:
 #
 #   * The sysprep volume. The golden image was sysprepped with /oobe, so without an
-#     answer file the clone boots into the OOBE setup wizard instead of the desktop.
+#     answer file the VM boots into the OOBE setup wizard instead of the desktop.
 #     `make vm` applies deploy/windows-pool-unattend.yaml for you.
 #   * The hyperv enlightenments below. Windows runs acceptably slowly without them.
 #
@@ -21,20 +30,6 @@ metadata:
     lab-vm-os: windows
 spec:
   runStrategy: Always
-  dataVolumeTemplates:
-  - metadata:
-      name: __NAME__-disk
-    spec:
-      sourceRef:
-        kind: DataSource
-        name: __DATASOURCE__
-        namespace: default
-      storage:
-        accessModes: [ReadWriteOnce]
-        resources:
-          requests:
-            storage: 64Gi
-        storageClassName: standard
   template:
     metadata:
       labels:
@@ -79,8 +74,9 @@ spec:
         pod: {}
       volumes:
       - name: rootdisk
-        dataVolume:
-          name: __NAME__-disk
+        ephemeral:
+          persistentVolumeClaim:
+            claimName: __GOLDEN__
       - name: sysprep
         sysprep:
           configMap:

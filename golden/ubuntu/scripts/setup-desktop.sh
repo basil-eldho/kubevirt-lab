@@ -50,7 +50,7 @@ cat > /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml << 'EOF'
 </channel>
 EOF
 
-# Auto-login: student sees the desktop immediately on VNC connect — no login screen
+# Auto-login: the desktop is there as soon as VNC connects — no login screen
 cat > /etc/lightdm/lightdm.conf << 'EOF'
 [Seat:*]
 autologin-user=student
@@ -75,7 +75,7 @@ EOF
 # The password is capped at 8 characters on purpose: standard VNC auth derives a
 # DES key from the first 8 bytes and silently ignores the rest, so a longer value
 # here would not match what Guacamole sends. Keep this in sync with
-# UBUNTU_VNC_PASS in deploy/api.yaml.
+# UBUNTU_VNC_PASS in scripts/vm-connect.sh.
 x11vnc -storepasswd 'Lab@2024' /etc/x11vnc.pass
 chmod 600 /etc/x11vnc.pass
 
